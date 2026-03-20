@@ -8,8 +8,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -75,7 +75,7 @@ fun LogScreen(
                         }
                         clipboard.setText(AnnotatedString(text))
                     }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy all logs")
+                        Icon(Icons.Default.Share, contentDescription = "Copy all logs")
                     }
                     // Clear logs
                     IconButton(onClick = { showClearDialog = true }) {
