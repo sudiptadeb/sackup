@@ -13,6 +13,7 @@ import kotlinx.coroutines.channels.Channel
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.cancellation.CancellationException
 
 // ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -228,11 +229,20 @@ class BackupEngine(private val resolver: ContentResolver) {
             repeat(WORKER_COUNT) {
                 launch(Dispatchers.IO) {
                     for (job in channel) {
-                        if (isCancelled()) break
+                        if (isCancelled()) {
+                            // Drain remaining jobs without processing
+                            break
+                        }
 
                         try {
-                            copyOneFile(job, treeUri)
+                            copyOneFile(job, treeUri, isCancelled)
                             copiedBytes.addAndGet(job.phone.size)
+                        } catch (_: CancelledException) {
+                            // Don't count cancellation as a failure
+                            break
+                        } catch (e: CancellationException) {
+                            // Coroutine cancelled — rethrow to exit cleanly
+                            throw e
                         } catch (e: Exception) {
                             failedCount.incrementAndGet()
                             errors.add("${job.phone.name}: ${e.message}")
@@ -473,7 +483,7 @@ class BackupEngine(private val resolver: ContentResolver) {
 
     // ── File copy ─────────────────────────────────────────────────────────
 
-    private fun copyOneFile(job: CopyJob, treeUri: Uri) {
+    private fun copyOneFile(job: CopyJob, treeUri: Uri, isCancelled: () -> Boolean) {
         val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, job.destParentDocId)
         val mimeType = getMimeType(job.phone.name)
 
@@ -485,14 +495,27 @@ class BackupEngine(private val resolver: ContentResolver) {
         val inputStream = resolver.openInputStream(job.phone.uri)
             ?: throw Exception("Could not read source file")
 
-        outputStream.use { out ->
-            inputStream.use { inp ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var bytesRead: Int
-                while (inp.read(buffer).also { bytesRead = it } != -1) {
-                    out.write(buffer, 0, bytesRead)
+        try {
+            outputStream.use { out ->
+                inputStream.use { inp ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var bytesRead: Int
+                    while (inp.read(buffer).also { bytesRead = it } != -1) {
+                        if (isCancelled()) {
+                            // Clean up partial file
+                            try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
+                            throw CancelledException()
+                        }
+                        out.write(buffer, 0, bytesRead)
+                    }
                 }
             }
+        } catch (e: CancelledException) {
+            throw e
+        } catch (e: Exception) {
+            // Clean up partial file on error
+            try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
+            throw e
         }
 
         // Preserve timestamp
@@ -505,6 +528,8 @@ class BackupEngine(private val resolver: ContentResolver) {
             } catch (_: Exception) {}
         }
     }
+
+    class CancelledException : Exception("Cancelled")
 
     private fun getMimeType(fileName: String): String = when {
         fileName.endsWith(".jpg", true) || fileName.endsWith(".jpeg", true) -> "image/jpeg"

@@ -116,8 +116,14 @@ class BackupService : Service() {
                 backupJob = scope.launch { runBackup(groupId, driveUri) }
             }
             ACTION_CANCEL -> {
-                cancelled = true
-                backupJob?.cancel()
+                if (!cancelled) {
+                    cancelled = true
+                    scope.launch {
+                        log("INFO", currentGroupName.ifEmpty { "Backup" }, "Cancel requested by user")
+                    }
+                    backupJob?.cancel()
+                    updateNotification("Cancelling...")
+                }
             }
         }
         return START_NOT_STICKY
@@ -188,45 +194,56 @@ class BackupService : Service() {
         currentPhase = "Copying"
         startTimeMillis = System.currentTimeMillis()
         updateNotification("Copying ${snapshot.filesToCopy.size} files...")
-        log("INFO", group.name, "Phase 2: Copying with ${BackupEngine.WORKER_COUNT} workers...")
+        log("INFO", group.name, "Phase 2: Copying with ${BackupEngine.WORKER_COUNT} workers, ${BackupEngine.BUFFER_SIZE / 1024 / 1024}MB buffers...")
 
-        val copiedFileKeys = mutableSetOf<String>()
+        val copiedFileKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-        val copyResult = engine.parallelCopy(
-            snapshot = snapshot,
-            treeUri = driveUri,
-            groupDriveFolder = group.driveFolder,
-            phoneFolders = phoneFolders,
-            isCancelled = { cancelled },
-            onProgress = { completed, fileName, bytes, speed ->
-                completedFiles = completed
-                currentFileName = fileName
-                copiedBytes = bytes
-                bytesPerSecond = speed
-                progressPercent = if (totalFiles > 0) (completed * 100 / totalFiles) else 0
-                updateNotification("Copying: $fileName ($completed/$totalFiles)")
+        val copyResult: CopyResult
+        try {
+            copyResult = engine.parallelCopy(
+                snapshot = snapshot,
+                treeUri = driveUri,
+                groupDriveFolder = group.driveFolder,
+                phoneFolders = phoneFolders,
+                isCancelled = { cancelled },
+                onProgress = { completed, fileName, bytes, speed ->
+                    completedFiles = completed
+                    currentFileName = fileName
+                    copiedBytes = bytes
+                    bytesPerSecond = speed
+                    progressPercent = if (totalFiles > 0) (completed * 100 / totalFiles) else 0
+                    updateNotification("Copying: $fileName ($completed/$totalFiles)")
 
-                // Track successfully copied files
-                if (speed >= 0) { // not failed
+                    // Track successfully copied files (the callback fires after success)
                     val pf = snapshot.filesToCopy.getOrNull(completed - 1)
                     if (pf != null) copiedFileKeys.add("${pf.drivePath}|${pf.name}")
                 }
-            }
-        )
+            )
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            log("INFO", group.name, "Backup cancelled — copy workers stopped")
+            finishBackup()
+            return
+        }
 
         if (cancelled) {
-            log("INFO", group.name, "Backup cancelled by user")
+            log("INFO", group.name, "Backup cancelled after copying $completedFiles/$totalFiles files")
+            finishBackup()
+            return
         }
 
         failedFiles = copyResult.failedCount
         failedFilesList = copyResult.failedFiles
 
+        val elapsed = System.currentTimeMillis() - startTimeMillis
         val summary = buildString {
-            append("${group.name} backup ")
-            if (cancelled) append("cancelled. ") else append("complete. ")
+            append("${group.name} backup complete. ")
             append("${copyResult.copiedCount} files copied (${formatBytes(copyResult.copiedSize)})")
             if (skippedFiles > 0) append(", $skippedFiles already on drive")
             if (copyResult.failedCount > 0) append(", ${copyResult.failedCount} failed")
+            if (elapsed > 0 && copyResult.copiedSize > 0) {
+                val avgSpeed = copyResult.copiedSize * 1000 / elapsed
+                append(". Speed: ${formatBytes(avgSpeed)}/s")
+            }
             append(".")
         }
         log("INFO", group.name, summary)
@@ -241,14 +258,12 @@ class BackupService : Service() {
         )
 
         // ── Phase 3: Manifest rebuild ─────────────────────────────────────
-        if (!cancelled) {
-            currentPhase = "Finishing"
-            updateNotification("Updating manifest...")
-            log("INFO", group.name, "Phase 3: Rebuilding manifest...")
-            val backupSuccess = copyResult.failedCount == 0
-            rebuildManifest(group.id, engine, snapshot, copiedFileKeys, backupSuccess)
-            log("INFO", group.name, "Manifest updated")
-        }
+        currentPhase = "Finishing"
+        updateNotification("Updating manifest...")
+        log("INFO", group.name, "Phase 3: Rebuilding manifest...")
+        val backupSuccess = copyResult.failedCount == 0
+        rebuildManifest(group.id, engine, snapshot, copiedFileKeys, backupSuccess)
+        log("INFO", group.name, "Manifest updated")
 
         finishBackup()
     }
