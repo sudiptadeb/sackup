@@ -73,7 +73,7 @@ class BackupEngine(private val resolver: ContentResolver) {
 
     companion object {
         const val BUFFER_SIZE = 4 * 1024 * 1024  // 4MB
-        const val WORKER_COUNT = 4
+        const val WORKER_COUNT = 2  // USB is serial — more workers = more SAF overhead, not more throughput
     }
 
     // ── Phase 1: Snapshot & Diff ──────────────────────────────────────────
@@ -233,6 +233,10 @@ class BackupEngine(private val resolver: ContentResolver) {
         val errors = ConcurrentLinkedQueue<String>()
         val startTime = System.currentTimeMillis()
 
+        // Rolling speed: track bytes at a timestamp 5 seconds ago
+        val rollingBytesRef = AtomicLong(0)
+        val rollingTimeRef = AtomicLong(startTime)
+
         for (job in jobs) channel.send(job)
         channel.close()
 
@@ -240,19 +244,14 @@ class BackupEngine(private val resolver: ContentResolver) {
             repeat(WORKER_COUNT) {
                 launch(Dispatchers.IO) {
                     for (job in channel) {
-                        if (isCancelled()) {
-                            // Drain remaining jobs without processing
-                            break
-                        }
+                        if (isCancelled()) break
 
                         try {
                             copyOneFile(job, treeUri, isCancelled)
                             copiedBytes.addAndGet(job.phone.size)
                         } catch (_: CancelledException) {
-                            // Don't count cancellation as a failure
                             break
                         } catch (e: CancellationException) {
-                            // Coroutine cancelled — rethrow to exit cleanly
                             throw e
                         } catch (e: Exception) {
                             failedCount.incrementAndGet()
@@ -260,9 +259,21 @@ class BackupEngine(private val resolver: ContentResolver) {
                         }
 
                         val c = completedCount.incrementAndGet()
-                        val elapsed = System.currentTimeMillis() - startTime
-                        val speed = if (elapsed > 0) copiedBytes.get() * 1000 / elapsed else 0L
-                        onProgress(c, job.phone.name, copiedBytes.get(), speed)
+                        val now = System.currentTimeMillis()
+                        val totalCopied = copiedBytes.get()
+
+                        // Rolling speed over ~5 second window
+                        val windowMs = now - rollingTimeRef.get()
+                        val speed = if (windowMs >= 5000) {
+                            val bytesInWindow = totalCopied - rollingBytesRef.get()
+                            rollingBytesRef.set(totalCopied)
+                            rollingTimeRef.set(now)
+                            bytesInWindow * 1000 / windowMs
+                        } else if (now > startTime) {
+                            totalCopied * 1000 / (now - startTime)
+                        } else 0L
+
+                        onProgress(c, job.phone.name, totalCopied, speed)
                     }
                 }
             }
@@ -513,12 +524,12 @@ class BackupEngine(private val resolver: ContentResolver) {
                     var bytesRead: Int
                     while (inp.read(buffer).also { bytesRead = it } != -1) {
                         if (isCancelled()) {
-                            // Clean up partial file
                             try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
                             throw CancelledException()
                         }
                         out.write(buffer, 0, bytesRead)
                     }
+                    out.flush()  // force data to USB, prevents OS cache burst illusion
                 }
             }
         } catch (e: CancelledException) {
