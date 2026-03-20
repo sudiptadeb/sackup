@@ -1,0 +1,56 @@
+package com.sackup.data
+
+import android.content.Context
+
+class BackupRepository(context: Context) {
+    private val db = AppDatabase.get(context)
+    private val groupDao = db.backupGroupDao()
+    private val logDao = db.logEntryDao()
+
+    // Backup Groups
+    suspend fun getAllGroups(): List<BackupGroup> = groupDao.getAll()
+    suspend fun getGroup(id: Long): BackupGroup? = groupDao.getById(id)
+    suspend fun insertGroup(group: BackupGroup): Long = groupDao.insert(group)
+    suspend fun updateGroup(group: BackupGroup) = groupDao.update(group)
+    suspend fun deleteGroup(group: BackupGroup) = groupDao.delete(group)
+    suspend fun groupCount(): Int = groupDao.count()
+
+    // Seed default groups if empty
+    suspend fun seedDefaults() {
+        if (groupDao.count() > 0) return
+        groupDao.insert(
+            BackupGroup(
+                name = "Camera",
+                phoneFolders = "[\"DCIM\",\"Pictures\"]",
+                driveFolder = "Camera-Backup"
+            )
+        )
+        groupDao.insert(
+            BackupGroup(
+                name = "Downloads",
+                phoneFolders = "[\"Download\"]",
+                driveFolder = "Downloads-Backup"
+            )
+        )
+        groupDao.insert(
+            BackupGroup(
+                name = "WhatsApp",
+                phoneFolders = "[\"WhatsApp/Media\"]",
+                driveFolder = "WhatsApp-Backup"
+            )
+        )
+    }
+
+    // Logs
+    suspend fun getAllLogs(): List<LogEntry> = logDao.getAll()
+    suspend fun getLogsBySession(sessionId: String): List<LogEntry> = logDao.getBySession(sessionId)
+    suspend fun getLogSessions(): List<String> = logDao.getSessionIds()
+    suspend fun insertLog(entry: LogEntry) = logDao.insert(entry)
+    suspend fun clearLogs() = logDao.deleteAll()
+
+    // Keep last 30 days of logs
+    suspend fun pruneOldLogs() {
+        val thirtyDaysAgo = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000)
+        logDao.deleteOlderThan(thirtyDaysAgo)
+    }
+}
