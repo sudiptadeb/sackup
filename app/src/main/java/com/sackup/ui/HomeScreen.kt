@@ -27,6 +27,7 @@ fun HomeScreen(
     groups: List<BackupGroup>,
     groupStats: Map<Long, FolderStats>,
     driveUri: Uri?,
+    driveName: String,
     driveConnected: Boolean,
     onPickDrive: () -> Unit,
     onBackup: (BackupGroup) -> Unit,
@@ -68,6 +69,7 @@ fun HomeScreen(
                 DriveStatusCard(
                     connected = driveConnected,
                     driveUri = driveUri,
+                    driveName = driveName,
                     onPickDrive = onPickDrive
                 )
             }
@@ -138,7 +140,7 @@ fun HomeScreen(
 }
 
 @Composable
-fun DriveStatusCard(connected: Boolean, driveUri: Uri?, onPickDrive: () -> Unit) {
+fun DriveStatusCard(connected: Boolean, driveUri: Uri?, driveName: String, onPickDrive: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -167,6 +169,10 @@ fun DriveStatusCard(connected: Boolean, driveUri: Uri?, onPickDrive: () -> Unit)
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
+                    if (driveName.isNotEmpty()) {
+                        Text(driveName, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
                 } else if (driveUri != null) {
                     // Previously selected but no longer accessible
                     Text(
@@ -249,12 +255,6 @@ fun BackupGroupCard(
                     }
                 }
             }
-
-            Text(
-                "To: ${group.driveFolder}/",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
 
             // Folder stats from phone
             if (stats != null) {

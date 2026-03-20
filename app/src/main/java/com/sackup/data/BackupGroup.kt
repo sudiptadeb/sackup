@@ -7,7 +7,6 @@ data class BackupGroup(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,                    // e.g. "Camera", "Downloads", "WhatsApp"
     val phoneFolders: String,            // JSON array of relative paths e.g. ["DCIM","Pictures"]
-    val driveFolder: String,             // e.g. "Camera-Backup"
     val lastBackupTime: Long = 0,        // epoch millis
     val lastBackupFileCount: Int = 0,
     val lastBackupBytes: Long = 0

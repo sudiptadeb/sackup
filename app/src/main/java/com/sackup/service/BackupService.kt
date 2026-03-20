@@ -164,7 +164,7 @@ class BackupService : Service() {
 
         val snapshot: SnapshotResult
         try {
-            snapshot = engine.snapshot(phoneFolders, driveUri, group.driveFolder, syncTimestamp)
+            snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp)
         } catch (e: Exception) {
             log("ERROR", group.name, "Scan failed: ${e.message}")
             finishBackup()
@@ -203,8 +203,6 @@ class BackupService : Service() {
             copyResult = engine.parallelCopy(
                 snapshot = snapshot,
                 treeUri = driveUri,
-                groupDriveFolder = group.driveFolder,
-                phoneFolders = phoneFolders,
                 isCancelled = { cancelled },
                 onProgress = { completed, fileName, bytes, speed ->
                     completedFiles = completed

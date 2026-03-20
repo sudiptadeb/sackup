@@ -35,7 +35,8 @@ data class FolderClearInfo(
     val phoneFolder: String,
     val entries: List<ManifestEntry>,  // sorted oldest first
     val totalSize: Long,
-    val hasSuccessfulBackup: Boolean
+    val hasSuccessfulBackup: Boolean,
+    val drivePath: String = ""       // e.g. "Neha's Backup/DCIM"
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -173,7 +174,16 @@ private fun FolderClearCard(
                 Text(folder.phoneFolder, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
 
-            Spacer(Modifier.height(8.dp))
+            if (folder.drivePath.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Backed up to: ${folder.drivePath}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(Modifier.height(4.dp))
             Text(
                 "${folder.entries.size} files backed up · ${formatBytes(folder.totalSize)}",
                 style = MaterialTheme.typography.bodyMedium,

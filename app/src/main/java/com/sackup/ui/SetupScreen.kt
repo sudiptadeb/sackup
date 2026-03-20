@@ -24,13 +24,11 @@ import androidx.compose.ui.unit.dp
 fun SetupScreen(
     initialName: String = "",
     initialPhoneFolders: List<String> = emptyList(),
-    initialDriveFolder: String = "",
     isEdit: Boolean = false,
-    onSave: (name: String, phoneFolders: List<String>, driveFolder: String) -> Unit,
+    onSave: (name: String, phoneFolders: List<String>) -> Unit,
     onBack: () -> Unit,
 ) {
     var name by remember { mutableStateOf(initialName) }
-    var driveFolder by remember { mutableStateOf(initialDriveFolder) }
     var phoneFolders by remember { mutableStateOf(initialPhoneFolders.toMutableList().ifEmpty { mutableListOf() }) }
 
     // SAF folder picker — extract relative path from internal storage
@@ -73,17 +71,6 @@ fun SetupScreen(
                 placeholder = { Text("e.g. Camera, Downloads") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
-            )
-
-            // Drive folder
-            OutlinedTextField(
-                value = driveFolder,
-                onValueChange = { driveFolder = it },
-                label = { Text("Drive Folder Name") },
-                placeholder = { Text("e.g. Camera-Backup") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = { Text("Files will be saved to this folder on the USB drive") }
             )
 
             // Phone folders
@@ -154,11 +141,11 @@ fun SetupScreen(
             Button(
                 onClick = {
                     val folders = phoneFolders.filter { it.isNotBlank() }
-                    if (name.isNotBlank() && driveFolder.isNotBlank() && folders.isNotEmpty()) {
-                        onSave(name, folders, driveFolder)
+                    if (name.isNotBlank() && folders.isNotEmpty()) {
+                        onSave(name, folders)
                     }
                 },
-                enabled = name.isNotBlank() && driveFolder.isNotBlank() && phoneFolders.isNotEmpty(),
+                enabled = name.isNotBlank() && phoneFolders.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp)

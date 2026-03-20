@@ -21,7 +21,6 @@ import com.sackup.util.formatBytes
 
 data class AnalyzeSummary(
     val groupName: String,
-    val driveFolder: String,
     val folders: List<FolderDiff>,
     val driveConnected: Boolean,
     val totalToCopy: Int,

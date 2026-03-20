@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var repo: BackupRepository
     private var driveUri by mutableStateOf<Uri?>(null)
     private var driveConnected by mutableStateOf(false)
+    private var driveName by mutableStateOf("")
     private var groups = mutableStateListOf<BackupGroup>()
     private var groupStats = mutableStateMapOf<Long, FolderStats>()
     private var logs = mutableStateListOf<LogEntry>()
@@ -56,6 +57,7 @@ class MainActivity : ComponentActivity() {
             )
             driveUri = uri
             driveConnected = true
+            driveName = resolveDriveName(uri)
 
             // Save to shared prefs
             getSharedPreferences("sackup", MODE_PRIVATE)
@@ -84,6 +86,7 @@ class MainActivity : ComponentActivity() {
         if (savedUri != null) {
             driveUri = Uri.parse(savedUri)
             checkDriveConnection()
+            if (driveConnected) driveName = resolveDriveName(driveUri!!)
         }
 
         requestPermissions()
@@ -111,6 +114,7 @@ class MainActivity : ComponentActivity() {
                             groups = groups,
                             groupStats = groupStats,
                             driveUri = driveUri,
+                            driveName = driveName,
                             driveConnected = driveConnected,
                             onPickDrive = { pickDriveLauncher.launch(null) },
                             onBackup = { group ->
@@ -152,13 +156,12 @@ class MainActivity : ComponentActivity() {
                     composable(Routes.SETUP_NEW) {
                         SetupScreen(
                             isEdit = false,
-                            onSave = { name, phoneFolders, driveFolder ->
+                            onSave = { name, phoneFolders ->
                                 scope.launch {
                                     repo.insertGroup(
                                         BackupGroup(
                                             name = name,
-                                            phoneFolders = Gson().toJson(phoneFolders),
-                                            driveFolder = driveFolder
+                                            phoneFolders = Gson().toJson(phoneFolders)
                                         )
                                     )
                                     refreshGroups()
@@ -186,15 +189,13 @@ class MainActivity : ComponentActivity() {
                             SetupScreen(
                                 initialName = g.name,
                                 initialPhoneFolders = folders,
-                                initialDriveFolder = g.driveFolder,
                                 isEdit = true,
-                                onSave = { name, phoneFolders, driveFolder ->
+                                onSave = { name, phoneFolders ->
                                     scope.launch {
                                         repo.updateGroup(
                                             g.copy(
                                                 name = name,
-                                                phoneFolders = Gson().toJson(phoneFolders),
-                                                driveFolder = driveFolder
+                                                phoneFolders = Gson().toJson(phoneFolders)
                                             )
                                         )
                                         refreshGroups()
@@ -263,7 +264,8 @@ class MainActivity : ComponentActivity() {
                                         phoneFolder = phoneFolder,
                                         entries = successEntries,
                                         totalSize = successEntries.sumOf { it.fileSize },
-                                        hasSuccessfulBackup = hasSuccess && successEntries.isNotEmpty()
+                                        hasSuccessfulBackup = hasSuccess && successEntries.isNotEmpty(),
+                                        drivePath = if (driveName.isNotEmpty()) "$driveName/$phoneFolder" else phoneFolder
                                     )
                                 }
                                 isLoading = false
@@ -317,11 +319,10 @@ class MainActivity : ComponentActivity() {
                                 if (uri != null && driveConnected) {
                                     val engine = BackupEngine(contentResolver)
                                     val snapshot = withContext(Dispatchers.IO) {
-                                        engine.snapshot(phoneFolders, uri, group.driveFolder)
+                                        engine.snapshot(phoneFolders, uri)
                                     }
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
-                                        driveFolder = group.driveFolder,
                                         folders = snapshot.perFolder,
                                         driveConnected = true,
                                         totalToCopy = snapshot.filesToCopy.size,
@@ -330,7 +331,6 @@ class MainActivity : ComponentActivity() {
                                 } else {
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
-                                        driveFolder = group.driveFolder,
                                         folders = emptyList(),
                                         driveConnected = false,
                                         totalToCopy = 0,
@@ -383,22 +383,30 @@ class MainActivity : ComponentActivity() {
     private fun checkDriveConnection() {
         val uri = driveUri ?: run {
             driveConnected = false
+            driveName = ""
             return
         }
-        // Check permission still exists
         val hasPermission = contentResolver.persistedUriPermissions
             .any { it.uri == uri && it.isWritePermission }
         if (!hasPermission) {
             driveConnected = false
             return
         }
-        // Actually try to access the drive to verify it's plugged in
         driveConnected = try {
             val docFile = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)
             docFile != null && docFile.exists() && docFile.canWrite()
         } catch (_: Exception) {
             false
         }
+        if (driveConnected) driveName = resolveDriveName(uri)
+    }
+
+    /** Get display name of the selected drive folder from its SAF URI. */
+    private fun resolveDriveName(uri: Uri): String {
+        return try {
+            val docFile = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)
+            docFile?.name ?: ""
+        } catch (_: Exception) { "" }
     }
 
     private suspend fun refreshGroups() {
