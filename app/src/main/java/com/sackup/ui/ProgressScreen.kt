@@ -49,6 +49,7 @@ fun ProgressScreen(
     val failedList = BackupService.failedFilesList
     val speed = BackupService.bytesPerSecond
     val startTime = BackupService.startTimeMillis
+    val phase = BackupService.currentPhase
 
     Scaffold(
         topBar = {
@@ -80,13 +81,40 @@ fun ProgressScreen(
             Spacer(Modifier.height(8.dp))
 
             if (!isDone && isRunning) {
-                // Progress indicator
-                LinearProgressIndicator(
-                    progress = { percent / 100f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(12.dp),
-                )
+                // Phase indicator
+                if (phase.isNotEmpty()) {
+                    Text(
+                        phase,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (phase == "Scanning") {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(12.dp))
+                    Text(
+                        "Scanning phone and drive...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else if (phase == "Finishing") {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(12.dp))
+                    Text(
+                        "Updating manifest...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Progress indicator (for Copying phase)
+                if (phase == "Copying" || (phase.isEmpty() && total > 0)) {
+                    LinearProgressIndicator(
+                        progress = { percent / 100f },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(12.dp),
+                    )
+                }
 
                 Text(
                     "$percent%",

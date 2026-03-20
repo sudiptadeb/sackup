@@ -16,25 +16,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sackup.service.FolderDiff
 import com.sackup.util.formatBytes
-
-data class AnalyzeResult(
-    val phoneFolder: String,
-    val onPhoneOnly: Int,          // files on phone but not on drive
-    val onPhoneOnlySize: Long,
-    val backedUp: Int,             // files on both phone and drive
-    val backedUpSize: Long,
-    val onDriveOnly: Int,          // files on drive but deleted from phone
-    val onDriveOnlySize: Long,
-    val totalOnPhone: Int,
-    val totalOnDrive: Int
-)
 
 data class AnalyzeSummary(
     val groupName: String,
     val driveFolder: String,
-    val folders: List<AnalyzeResult>,
-    val driveConnected: Boolean
+    val folders: List<FolderDiff>,
+    val driveConnected: Boolean,
+    val totalToCopy: Int,
+    val totalToCopySize: Long
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,6 +33,7 @@ data class AnalyzeSummary(
 fun AnalyzeScreen(
     summary: AnalyzeSummary?,
     isLoading: Boolean,
+    onSyncNow: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -85,10 +77,10 @@ fun AnalyzeScreen(
             ) {
                 // Overall summary card
                 item {
-                    val totalNotBacked = summary.folders.sumOf { it.onPhoneOnly }
-                    val totalNotBackedSize = summary.folders.sumOf { it.onPhoneOnlySize }
-                    val totalBacked = summary.folders.sumOf { it.backedUp }
-                    val totalBackedSize = summary.folders.sumOf { it.backedUpSize }
+                    val totalNotBacked = summary.folders.sumOf { it.toCopy }
+                    val totalNotBackedSize = summary.folders.sumOf { it.toCopySize }
+                    val totalBacked = summary.folders.sumOf { it.alreadyOnDrive }
+                    val totalBackedSize = summary.folders.sumOf { it.alreadyOnDriveSize }
                     val totalDriveOnly = summary.folders.sumOf { it.onDriveOnly }
                     val totalDriveOnlySize = summary.folders.sumOf { it.onDriveOnlySize }
 
@@ -148,6 +140,47 @@ fun AnalyzeScreen(
                     }
                 }
 
+                // Sync Now button
+                if (summary.totalToCopy > 0 && summary.driveConnected) {
+                    item {
+                        Button(
+                            onClick = onSyncNow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                        ) {
+                            Text(
+                                "Sync Now — ${summary.totalToCopy} files (${formatBytes(summary.totalToCopySize)})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        }
+                    }
+                } else if (summary.totalToCopy == 0 && summary.driveConnected) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.CheckCircle, null,
+                                    tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    "Everything is backed up!",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Per-folder breakdown
                 items(summary.folders, key = { it.phoneFolder }) { result ->
                     AnalyzeFolderCard(result)
@@ -183,7 +216,7 @@ fun AnalyzeStatRow(
 }
 
 @Composable
-fun AnalyzeFolderCard(result: AnalyzeResult) {
+fun AnalyzeFolderCard(result: FolderDiff) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -205,22 +238,22 @@ fun AnalyzeFolderCard(result: AnalyzeResult) {
 
             Spacer(Modifier.height(8.dp))
 
-            if (result.onPhoneOnly > 0) {
+            if (result.toCopy > 0) {
                 AnalyzeStatRow(
                     icon = Icons.Default.Warning,
                     iconTint = Color(0xFFFF9800),
                     label = "Not backed up",
-                    count = result.onPhoneOnly,
-                    size = result.onPhoneOnlySize
+                    count = result.toCopy,
+                    size = result.toCopySize
                 )
             }
-            if (result.backedUp > 0) {
+            if (result.alreadyOnDrive > 0) {
                 AnalyzeStatRow(
                     icon = Icons.Default.CheckCircle,
                     iconTint = MaterialTheme.colorScheme.primary,
                     label = "Backed up",
-                    count = result.backedUp,
-                    size = result.backedUpSize
+                    count = result.alreadyOnDrive,
+                    size = result.alreadyOnDriveSize
                 )
             }
             if (result.onDriveOnly > 0) {
@@ -232,7 +265,7 @@ fun AnalyzeFolderCard(result: AnalyzeResult) {
                     size = result.onDriveOnlySize
                 )
             }
-            if (result.onPhoneOnly == 0 && result.totalOnPhone > 0) {
+            if (result.toCopy == 0 && result.totalOnPhone > 0) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Fully backed up",
