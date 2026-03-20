@@ -22,22 +22,19 @@ class BackupRepository(context: Context) {
         groupDao.insert(
             BackupGroup(
                 name = "Camera",
-                phoneFolders = "[\"DCIM\",\"Pictures\"]",
-                driveFolder = "Camera-Backup"
+                phoneFolders = "[\"DCIM\",\"Pictures\"]"
             )
         )
         groupDao.insert(
             BackupGroup(
                 name = "Downloads",
-                phoneFolders = "[\"Download\"]",
-                driveFolder = "Downloads-Backup"
+                phoneFolders = "[\"Download\"]"
             )
         )
         groupDao.insert(
             BackupGroup(
                 name = "WhatsApp",
-                phoneFolders = "[\"WhatsApp/Media\"]",
-                driveFolder = "WhatsApp-Backup"
+                phoneFolders = "[\"WhatsApp/Media\"]"
             )
         )
     }

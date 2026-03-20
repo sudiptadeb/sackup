@@ -81,33 +81,41 @@ class BackupEngine(private val resolver: ContentResolver) {
     fun snapshot(
         phoneFolders: List<String>,
         treeUri: Uri,
-        groupDriveFolder: String,
         syncTimestamp: Long = Long.MAX_VALUE  // only include files with DATE_MODIFIED <= this
     ): SnapshotResult {
-        // 1. Get or find the group's drive folder doc ID
+        // 1. Get drive root doc ID
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
-        val groupDirDocId = findChildDocId(treeUri, rootDocId, groupDriveFolder)
 
         // 2. Scan drive using DocumentsContract cursors (fast)
         val driveFileCache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
         val dirDocIds = mutableMapOf<String, String>()
 
-        if (groupDirDocId != null) {
-            for (folderPath in phoneFolders) {
-                val topName = folderPath.replace("/", "_")
-                val topDocId = findChildDocId(treeUri, groupDirDocId, topName)
-                if (topDocId != null) {
-                    dirDocIds[topName] = topDocId
-                    scanDriveCursor(treeUri, topDocId, topName, driveFileCache, dirDocIds)
+        for (folderPath in phoneFolders) {
+            // Navigate multi-segment paths from root (e.g. "WhatsApp/Media")
+            val segments = folderPath.split("/")
+            var currentDocId = rootDocId
+            var currentPath = ""
+            var found = true
+            for (segment in segments) {
+                currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+                val childDocId = findChildDocId(treeUri, currentDocId, segment)
+                if (childDocId != null) {
+                    dirDocIds[currentPath] = childDocId
+                    currentDocId = childDocId
+                } else {
+                    found = false
+                    break
                 }
+            }
+            if (found) {
+                scanDriveCursor(treeUri, currentDocId, folderPath, driveFileCache, dirDocIds)
             }
         }
 
         // 3. Query phone files from MediaStore with timestamp filter
         val allPhoneFiles = mutableListOf<PhoneFile>()
         for (folderPath in phoneFolders) {
-            val topName = folderPath.replace("/", "_")
-            allPhoneFiles.addAll(queryPhoneFiles(folderPath, topName, syncTimestamp))
+            allPhoneFiles.addAll(queryPhoneFiles(folderPath, folderPath, syncTimestamp))
         }
 
         // 4. Diff per folder
@@ -116,13 +124,12 @@ class BackupEngine(private val resolver: ContentResolver) {
         val perFolder = mutableListOf<FolderDiff>()
 
         for (folderPath in phoneFolders) {
-            val topName = folderPath.replace("/", "_")
             val phoneFolderFiles = allPhoneFiles.filter { it.phoneFolder == folderPath }
 
-            // Collect all drive files under this top folder
+            // Collect all drive files under this folder
             val driveKeys = mutableMapOf<String, DriveFileInfo>() // "drivePath|name" → info
             for ((drivePath, files) in driveFileCache) {
-                if (drivePath == topName || drivePath.startsWith("$topName/")) {
+                if (drivePath == folderPath || drivePath.startsWith("$folderPath/")) {
                     for ((name, info) in files) {
                         driveKeys["$drivePath|$name"] = info
                     }
@@ -196,23 +203,17 @@ class BackupEngine(private val resolver: ContentResolver) {
     suspend fun parallelCopy(
         snapshot: SnapshotResult,
         treeUri: Uri,
-        groupDriveFolder: String,
-        phoneFolders: List<String>,
         isCancelled: () -> Boolean,
         onProgress: (completed: Int, fileName: String, copiedBytes: Long, speed: Long) -> Unit
     ): CopyResult {
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
-        val groupDirDocId = findChildDocId(treeUri, rootDocId, groupDriveFolder)
-            ?: createChildDir(treeUri, rootDocId, groupDriveFolder)
-            ?: return CopyResult(0, 0, snapshot.filesToCopy.size,
-                listOf("Could not create drive folder '$groupDriveFolder'"))
 
         // Pre-create all needed directories and collect doc IDs
         val dirDocIds = snapshot.dirDocIds.toMutableMap()
         val neededPaths = snapshot.filesToCopy.map { it.drivePath }.toSet()
         for (path in neededPaths) {
             if (path !in dirDocIds) {
-                ensureDirPath(treeUri, groupDirDocId, path, dirDocIds)
+                ensureDirPath(treeUri, rootDocId, path, dirDocIds)
             }
         }
 
