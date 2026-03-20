@@ -356,6 +356,9 @@ class MainActivity : ComponentActivity() {
                                     navController.navigate(Routes.PROGRESS)
                                 }
                             },
+                            onExport = {
+                                analyzeSummary?.let { s -> exportAnalyzeReport(s) }
+                            },
                             onBack = { navController.popBackStack() }
                         )
                     }
@@ -396,6 +399,37 @@ class MainActivity : ComponentActivity() {
             }
         }
         return result
+    }
+
+    private fun exportAnalyzeReport(summary: AnalyzeSummary) {
+        val sb = StringBuilder()
+        sb.appendLine("SackUp Analyze Report — ${summary.groupName}")
+        sb.appendLine("Generated: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())}")
+        sb.appendLine("Drive connected: ${summary.driveConnected}")
+        sb.appendLine()
+        sb.appendLine("=== Summary ===")
+        sb.appendLine("To copy: ${summary.totalToCopy} files (${com.sackup.util.formatBytes(summary.totalToCopySize)})")
+        sb.appendLine("Already on drive: ${summary.folders.sumOf { it.alreadyOnDrive }}")
+        sb.appendLine("On drive only: ${summary.folders.sumOf { it.onDriveOnly }}")
+        sb.appendLine()
+
+        for (f in summary.folders) {
+            sb.appendLine("=== ${f.phoneFolder} ===")
+            sb.appendLine("  On phone: ${f.totalOnPhone}")
+            sb.appendLine("  On drive: ${f.totalOnDrive}")
+            sb.appendLine("  To copy: ${f.toCopy} (${com.sackup.util.formatBytes(f.toCopySize)})")
+            sb.appendLine("  Backed up: ${f.alreadyOnDrive} (${com.sackup.util.formatBytes(f.alreadyOnDriveSize)})")
+            sb.appendLine("  On drive only: ${f.onDriveOnly} (${com.sackup.util.formatBytes(f.onDriveOnlySize)})")
+            sb.appendLine()
+        }
+
+        // Share via intent
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "SackUp Analyze — ${summary.groupName}")
+            putExtra(Intent.EXTRA_TEXT, sb.toString())
+        }
+        startActivity(Intent.createChooser(intent, "Share report"))
     }
 
     private fun checkDriveConnection() {
