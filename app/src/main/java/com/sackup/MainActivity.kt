@@ -238,6 +238,7 @@ class MainActivity : ComponentActivity() {
 
                         var group by remember { mutableStateOf<BackupGroup?>(null) }
                         var folders by remember { mutableStateOf<List<FolderClearInfo>>(emptyList()) }
+                        var fileUris by remember { mutableStateOf<Map<Long, Uri>>(emptyMap()) }
                         var isLoading by remember { mutableStateOf(true) }
 
                         LaunchedEffect(groupId) {
@@ -250,7 +251,6 @@ class MainActivity : ComponentActivity() {
                                 val manifest = withContext(Dispatchers.IO) {
                                     repo.getSuccessfulManifest(groupId)
                                 }
-                                // Also get failed entries to show warning
                                 val allManifest = withContext(Dispatchers.IO) {
                                     repo.getManifestForGroup(groupId)
                                 }
@@ -268,6 +268,13 @@ class MainActivity : ComponentActivity() {
                                         drivePath = if (driveName.isNotEmpty()) "$driveName/$phoneFolder" else phoneFolder
                                     )
                                 }
+
+                                // Batch-resolve all file URIs upfront for smooth scrolling
+                                val allEntries = folders.flatMap { it.entries }
+                                fileUris = withContext(Dispatchers.IO) {
+                                    batchResolveFileUris(allEntries)
+                                }
+
                                 isLoading = false
                             }
                         }
@@ -287,14 +294,11 @@ class MainActivity : ComponentActivity() {
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
-                                    // Refresh
                                     navController.popBackStack()
                                     navController.navigate(Routes.clearSpace(groupId))
                                 }
                             },
-                            resolveFileUri = { entry ->
-                                resolveManifestFileUri(entry)
-                            },
+                            fileUris = fileUris,
                             onBack = { navController.popBackStack() }
                         )
                     }
@@ -361,23 +365,37 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Resolve a manifest entry to its MediaStore content URI for thumbnail loading.
+     * Batch-resolve manifest entries to MediaStore content URIs.
+     * Groups by phonePath to minimize queries. Returns map of entry.id → URI.
      */
-    private fun resolveManifestFileUri(entry: ManifestEntry): Uri? {
+    private fun batchResolveFileUris(entries: List<ManifestEntry>): Map<Long, Uri> {
+        val result = mutableMapOf<Long, Uri>()
         val collection = MediaStore.Files.getContentUri("external")
-        val projection = arrayOf(MediaStore.Files.FileColumns._ID)
-        val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
-                "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
-                "${MediaStore.Files.FileColumns.SIZE} = ?"
-        val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.SIZE
+        )
 
-        contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
-                return android.content.ContentUris.withAppendedId(collection, id)
+        // Group entries by phonePath to batch queries
+        val byPath = entries.groupBy { it.phonePath }
+        for ((phonePath, pathEntries) in byPath) {
+            val entryLookup = pathEntries.associateBy { "${it.fileName}|${it.fileSize}" }
+            val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+            contentResolver.query(collection, projection, selection, arrayOf(phonePath), null)?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameCol) ?: continue
+                    val size = cursor.getLong(sizeCol)
+                    val entry = entryLookup["$name|$size"] ?: continue
+                    val mediaId = cursor.getLong(idCol)
+                    result[entry.id] = android.content.ContentUris.withAppendedId(collection, mediaId)
+                }
             }
         }
-        return null
+        return result
     }
 
     private fun checkDriveConnection() {

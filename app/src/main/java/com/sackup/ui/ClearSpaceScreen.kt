@@ -46,7 +46,7 @@ fun ClearSpaceScreen(
     folders: List<FolderClearInfo>,
     isLoading: Boolean,
     onDeleteEntries: (entries: List<ManifestEntry>) -> Unit,
-    resolveFileUri: (ManifestEntry) -> Uri?,
+    fileUris: Map<Long, Uri>,  // manifest entry id → content URI (pre-resolved)
     onBack: () -> Unit,
 ) {
     // Which sub-screen: null = folder list, non-null = viewing files in that folder
@@ -59,7 +59,7 @@ fun ClearSpaceScreen(
                 onDeleteEntries(entries)
                 viewingFolder = null
             },
-            resolveFileUri = resolveFileUri,
+            fileUris = fileUris,
             onBack = { viewingFolder = null }
         )
     } else {
@@ -245,7 +245,7 @@ private fun FolderClearCard(
 private fun FileViewerScreen(
     folder: FolderClearInfo,
     onDelete: (List<ManifestEntry>) -> Unit,
-    resolveFileUri: (ManifestEntry) -> Uri?,
+    fileUris: Map<Long, Uri>,
     onBack: () -> Unit,
 ) {
     val entries = folder.entries
@@ -362,7 +362,7 @@ private fun FileViewerScreen(
             ) {
                 items(entries, key = { it.id }) { entry ->
                     val isSelected = entry in selected
-                    val uri = resolveFileUri(entry)
+                    val uri = fileUris[entry.id]
                     ThumbnailGridItem(
                         entry = entry,
                         uri = uri,
@@ -381,7 +381,7 @@ private fun FileViewerScreen(
             ) {
                 items(entries, key = { it.id }) { entry ->
                     val isSelected = entry in selected
-                    val uri = resolveFileUri(entry)
+                    val uri = fileUris[entry.id]
                     FileListItem(
                         entry = entry,
                         uri = uri,
@@ -412,7 +412,7 @@ private fun ThumbnailGridItem(
     ) {
         if (uri != null && isImageOrVideo(entry.fileName)) {
             AsyncImage(
-                model = ImageRequest.Builder(context).data(uri).crossfade(true).size(256).build(),
+                model = ImageRequest.Builder(context).data(uri).crossfade(false).size(150).build(),
                 contentDescription = entry.fileName,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -492,7 +492,7 @@ private fun FileListItem(
             Box(modifier = Modifier.size(48.dp).clip(MaterialTheme.shapes.small)) {
                 if (uri != null && isImageOrVideo(entry.fileName)) {
                     AsyncImage(
-                        model = ImageRequest.Builder(context).data(uri).crossfade(true).size(128).build(),
+                        model = ImageRequest.Builder(context).data(uri).crossfade(false).size(80).build(),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
