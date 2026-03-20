@@ -83,9 +83,7 @@ class MainActivity : ComponentActivity() {
         val savedUri = getSharedPreferences("sackup", MODE_PRIVATE).getString("drive_uri", null)
         if (savedUri != null) {
             driveUri = Uri.parse(savedUri)
-            // Check if permission is still valid
-            val persistedUris = contentResolver.persistedUriPermissions
-            driveConnected = persistedUris.any { it.uri == driveUri && it.isWritePermission }
+            checkDriveConnection()
         }
 
         requestPermissions()
@@ -104,7 +102,10 @@ class MainActivity : ComponentActivity() {
 
                     composable(Routes.HOME) {
                         // Refresh on every visit
-                        LaunchedEffect(Unit) { refreshGroups() }
+                        LaunchedEffect(Unit) {
+                            checkDriveConnection()
+                            refreshGroups()
+                        }
 
                         HomeScreen(
                             groups = groups,
@@ -354,6 +355,27 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun checkDriveConnection() {
+        val uri = driveUri ?: run {
+            driveConnected = false
+            return
+        }
+        // Check permission still exists
+        val hasPermission = contentResolver.persistedUriPermissions
+            .any { it.uri == uri && it.isWritePermission }
+        if (!hasPermission) {
+            driveConnected = false
+            return
+        }
+        // Actually try to access the drive to verify it's plugged in
+        driveConnected = try {
+            val docFile = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)
+            docFile != null && docFile.exists() && docFile.canWrite()
+        } catch (_: Exception) {
+            false
         }
     }
 

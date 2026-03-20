@@ -161,12 +161,29 @@ fun DriveStatusCard(connected: Boolean, driveUri: Uri?, onPickDrive: () -> Unit)
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    if (connected) "USB Drive Connected" else "No USB Drive",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-                if (!connected) {
+                if (connected) {
+                    Text(
+                        "USB Drive Connected",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                } else if (driveUri != null) {
+                    // Previously selected but no longer accessible
+                    Text(
+                        "USB Drive Not Connected",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    Text(
+                        "Plug in the drive or select a new one",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    Text(
+                        "No USB Drive",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
                     Text(
                         "Plug in a USB drive and tap Select Drive",
                         style = MaterialTheme.typography.bodySmall
