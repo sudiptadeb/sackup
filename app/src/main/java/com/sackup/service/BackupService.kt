@@ -22,6 +22,7 @@ import com.sackup.R
 import com.sackup.data.BackupGroup
 import com.sackup.data.BackupRepository
 import com.sackup.data.LogEntry
+import com.sackup.data.ManifestEntry
 import com.sackup.util.formatBytes
 import kotlinx.coroutines.*
 import java.util.UUID
@@ -303,6 +304,15 @@ class BackupService : Service() {
             )
         )
 
+        // Rebuild manifest: fresh scan of drive, cross-reference with phone files
+        if (!cancelled) {
+            updateNotification("Building manifest...")
+            log("INFO", group.name, "Rebuilding manifest...")
+            val backupSuccess = failedFiles == 0
+            rebuildManifest(group, phoneFolders, driveFolder, backupSuccess)
+            log("INFO", group.name, "Manifest updated")
+        }
+
         finishBackup(group)
     }
 
@@ -392,6 +402,77 @@ class BackupService : Service() {
         }
 
         return results
+    }
+
+    /**
+     * Rebuild the manifest by scanning the drive and matching against phone files.
+     * For each file on the drive, if a matching phone file exists (same name + size),
+     * create a manifest entry.
+     */
+    private suspend fun rebuildManifest(
+        group: BackupGroup,
+        phoneFolders: List<String>,
+        driveFolder: DocumentFile,
+        backupSuccess: Boolean
+    ) {
+        // Scan drive to get all files with their paths
+        val driveFiles = mutableListOf<Triple<String, String, Long>>() // drivePath, fileName, fileSize
+        fun scanDrive(docDir: DocumentFile, path: String) {
+            for (f in docDir.listFiles()) {
+                if (f.isDirectory) {
+                    scanDrive(f, "$path/${f.name ?: ""}")
+                } else if (f.isFile) {
+                    driveFiles.add(Triple(path, f.name ?: "", f.length()))
+                }
+            }
+        }
+        for (folderPath in phoneFolders) {
+            val subName = folderPath.replace("/", "_")
+            val subDir = driveFolder.findFile(subName) ?: continue
+            if (subDir.isDirectory) {
+                scanDrive(subDir, subName)
+            }
+        }
+
+        // Build a lookup of phone files: (phoneFolder, name, size) → (phonePath, dateModified)
+        val phoneFiles = mutableMapOf<String, Pair<String, Long>>() // "folder|name|size" → (phonePath, dateModified)
+        for (folderPath in phoneFolders) {
+            val topName = folderPath.replace("/", "_")
+            val files = queryMediaStoreFiles(folderPath, topName)
+            for (f in files) {
+                phoneFiles["${f.drivePath}|${f.name}|${f.size}"] = Pair(
+                    folderPath,
+                    f.dateModified
+                )
+            }
+        }
+
+        // Cross-reference: for each drive file, find matching phone file
+        val entries = mutableListOf<ManifestEntry>()
+        for ((drivePath, fileName, fileSize) in driveFiles) {
+            val key = "$drivePath|$fileName|$fileSize"
+            val phoneInfo = phoneFiles[key]
+            if (phoneInfo != null) {
+                val (phoneFolder, dateModified) = phoneInfo
+                // Derive phonePath from drivePath: "DCIM/Camera" → "DCIM/Camera/"
+                val topName = phoneFolder.replace("/", "_")
+                val subPath = drivePath.removePrefix(topName).trimStart('/')
+                val phonePath = if (subPath.isEmpty()) "$phoneFolder/" else "$phoneFolder/$subPath/"
+
+                entries.add(ManifestEntry(
+                    groupId = group.id,
+                    fileName = fileName,
+                    fileSize = fileSize,
+                    phoneFolder = phoneFolder,
+                    phonePath = phonePath,
+                    drivePath = drivePath,
+                    dateModified = dateModified,
+                    backupSuccess = backupSuccess
+                ))
+            }
+        }
+
+        repo.rebuildManifest(group.id, entries)
     }
 
     private fun getOrCreatePath(root: DocumentFile, path: String): DocumentFile? {

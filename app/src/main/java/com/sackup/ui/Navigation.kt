@@ -6,6 +6,8 @@ object Routes {
     const val SETUP_NEW = "setup/new"
     const val PROGRESS = "progress"
     const val LOGS = "logs"
+    const val CLEAR_SPACE = "clearspace/{groupId}"
 
     fun setup(groupId: Long) = "setup/$groupId"
+    fun clearSpace(groupId: Long) = "clearspace/$groupId"
 }
