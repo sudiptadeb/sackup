@@ -8,8 +8,10 @@ import android.app.Service
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.ContentValues
 import android.net.Uri
 import android.os.IBinder
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.documentfile.provider.DocumentFile
@@ -28,10 +30,11 @@ import java.util.UUID
  * Represents a file discovered via MediaStore that needs to be backed up.
  */
 private data class MediaFileInfo(
-    val uri: Uri,           // content:// URI to read from
-    val name: String,       // display name e.g. "IMG_001.jpg"
-    val size: Long,         // file size in bytes
-    val drivePath: String   // relative path on drive e.g. "DCIM/Camera"
+    val uri: Uri,              // content:// URI to read from
+    val name: String,          // display name e.g. "IMG_001.jpg"
+    val size: Long,            // file size in bytes
+    val drivePath: String,     // relative path on drive e.g. "DCIM/Camera"
+    val dateModified: Long     // last modified timestamp in seconds (epoch)
 )
 
 class BackupService : Service() {
@@ -320,7 +323,8 @@ class BackupService : Service() {
             MediaStore.Files.FileColumns._ID,
             MediaStore.Files.FileColumns.DISPLAY_NAME,
             MediaStore.Files.FileColumns.SIZE,
-            MediaStore.Files.FileColumns.RELATIVE_PATH
+            MediaStore.Files.FileColumns.RELATIVE_PATH,
+            MediaStore.Files.FileColumns.DATE_MODIFIED
         )
 
         // RELATIVE_PATH looks like "DCIM/Camera/" — match anything starting with our folder
@@ -333,12 +337,14 @@ class BackupService : Service() {
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
             val pathCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.RELATIVE_PATH)
+            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val name = cursor.getString(nameCol) ?: continue
                 val size = cursor.getLong(sizeCol)
                 val relativePath = cursor.getString(pathCol) ?: continue
+                val dateModified = cursor.getLong(dateCol)
 
                 val contentUri = ContentUris.withAppendedId(collection, id)
 
@@ -351,7 +357,8 @@ class BackupService : Service() {
                     uri = contentUri,
                     name = name,
                     size = size,
-                    drivePath = drivePath
+                    drivePath = drivePath,
+                    dateModified = dateModified
                 ))
             }
         }
@@ -364,11 +371,13 @@ class BackupService : Service() {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
             val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val name = cursor.getString(nameCol) ?: continue
                 val size = cursor.getLong(sizeCol)
+                val dateModified = cursor.getLong(dateCol)
 
                 val contentUri = ContentUris.withAppendedId(collection, id)
 
@@ -376,7 +385,8 @@ class BackupService : Service() {
                     uri = contentUri,
                     name = name,
                     size = size,
-                    drivePath = topName
+                    drivePath = topName,
+                    dateModified = dateModified
                 ))
             }
         }
@@ -441,6 +451,18 @@ class BackupService : Service() {
         if (destSize != source.size) {
             destFile.delete()
             throw Exception("Size mismatch after copy: expected ${formatBytes(source.size)}, got ${formatBytes(destSize)}")
+        }
+
+        // Preserve original modification timestamp
+        if (source.dateModified > 0) {
+            try {
+                val values = ContentValues().apply {
+                    put(DocumentsContract.Document.COLUMN_LAST_MODIFIED, source.dateModified * 1000)
+                }
+                resolver.update(destFile.uri, values, null, null)
+            } catch (_: Exception) {
+                // Not all document providers support setting timestamps — ignore
+            }
         }
     }
 

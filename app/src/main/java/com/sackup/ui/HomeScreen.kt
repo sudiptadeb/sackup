@@ -19,10 +19,13 @@ import com.sackup.util.formatBytes
 import java.text.SimpleDateFormat
 import java.util.*
 
+import com.sackup.util.FolderStats
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     groups: List<BackupGroup>,
+    groupStats: Map<Long, FolderStats>,
     driveUri: Uri?,
     driveConnected: Boolean,
     onPickDrive: () -> Unit,
@@ -102,6 +105,7 @@ fun HomeScreen(
             items(groups, key = { it.id }) { group ->
                 BackupGroupCard(
                     group = group,
+                    stats = groupStats[group.id],
                     driveConnected = driveConnected,
                     onBackup = { onBackup(group) },
                     onEdit = { onEditGroup(group) },
@@ -175,6 +179,7 @@ fun DriveStatusCard(connected: Boolean, driveUri: Uri?, onPickDrive: () -> Unit)
 @Composable
 fun BackupGroupCard(
     group: BackupGroup,
+    stats: FolderStats?,
     driveConnected: Boolean,
     onBackup: () -> Unit,
     onEdit: () -> Unit,
@@ -219,6 +224,16 @@ fun BackupGroupCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            // Folder stats from phone
+            if (stats != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "${stats.fileCount} files on phone · ${formatBytes(stats.totalSize)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
 
             if (group.lastBackupTime > 0) {
                 Spacer(Modifier.height(4.dp))
