@@ -33,6 +33,7 @@ fun HomeScreen(
     onEditGroup: (BackupGroup) -> Unit,
     onAddGroup: () -> Unit,
     onDeleteGroup: (BackupGroup) -> Unit,
+    onClearSpace: (BackupGroup) -> Unit,
     onViewLogs: () -> Unit,
     onViewProgress: () -> Unit,
 ) {
@@ -109,7 +110,8 @@ fun HomeScreen(
                     driveConnected = driveConnected,
                     onBackup = { onBackup(group) },
                     onEdit = { onEditGroup(group) },
-                    onDelete = { onDeleteGroup(group) }
+                    onDelete = { onDeleteGroup(group) },
+                    onClearSpace = { onClearSpace(group) }
                 )
             }
 
@@ -184,6 +186,7 @@ fun BackupGroupCard(
     onBackup: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onClearSpace: () -> Unit = {},
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -210,6 +213,10 @@ fun BackupGroupCard(
                         DropdownMenuItem(
                             text = { Text("Edit") },
                             onClick = { showMenu = false; onEdit() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Free Up Space") },
+                            onClick = { showMenu = false; onClearSpace() }
                         )
                         DropdownMenuItem(
                             text = { Text("Delete") },
