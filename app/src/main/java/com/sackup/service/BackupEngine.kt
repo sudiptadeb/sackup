@@ -434,6 +434,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         maxTimestamp: Long = Long.MAX_VALUE
     ): List<PhoneFile> {
         val results = mutableListOf<PhoneFile>()
+        val seenIds = mutableSetOf<Long>()  // deduplicate by MediaStore ID
         val collection = MediaStore.Files.getContentUri("external")
 
         val projection = arrayOf(
@@ -448,20 +449,16 @@ class BackupEngine(private val resolver: ContentResolver) {
             " AND ${MediaStore.Files.FileColumns.DATE_MODIFIED} <= ?"
         } else ""
 
-        // Files in subfolders
-        val subSel = "${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.Files.FileColumns.SIZE} > 0$timestampFilter"
-        val subArgs = if (maxTimestamp < Long.MAX_VALUE) arrayOf("$folderPath/%", maxTimestamp.toString()) else arrayOf("$folderPath/%")
-
-        resolver.query(collection, projection, subSel, subArgs, null)?.use { cursor ->
-            readPhoneCursor(cursor, collection, folderPath, topName, results)
+        // Single query: RELATIVE_PATH starts with folderPath/ (covers both direct and subfolders)
+        val selection = "(${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? OR ${MediaStore.Files.FileColumns.RELATIVE_PATH} = ?) AND ${MediaStore.Files.FileColumns.SIZE} > 0$timestampFilter"
+        val args = if (maxTimestamp < Long.MAX_VALUE) {
+            arrayOf("$folderPath/%", "$folderPath/", maxTimestamp.toString())
+        } else {
+            arrayOf("$folderPath/%", "$folderPath/")
         }
 
-        // Files directly in folder
-        val directSel = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0$timestampFilter"
-        val directArgs = if (maxTimestamp < Long.MAX_VALUE) arrayOf("$folderPath/", maxTimestamp.toString()) else arrayOf("$folderPath/")
-
-        resolver.query(collection, projection, directSel, directArgs, null)?.use { cursor ->
-            readPhoneCursor(cursor, collection, folderPath, topName, results)
+        resolver.query(collection, projection, selection, args, null)?.use { cursor ->
+            readPhoneCursor(cursor, collection, folderPath, topName, results, seenIds)
         }
 
         return results
@@ -472,7 +469,8 @@ class BackupEngine(private val resolver: ContentResolver) {
         collection: Uri,
         folderPath: String,
         topName: String,
-        results: MutableList<PhoneFile>
+        results: MutableList<PhoneFile>,
+        seenIds: MutableSet<Long> = mutableSetOf()
     ) {
         val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
         val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
@@ -482,6 +480,7 @@ class BackupEngine(private val resolver: ContentResolver) {
 
         while (cursor.moveToNext()) {
             val id = cursor.getLong(idCol)
+            if (!seenIds.add(id)) continue  // skip duplicates
             val name = cursor.getString(nameCol) ?: continue
             val size = cursor.getLong(sizeCol)
             val relativePath = cursor.getString(pathCol) ?: continue

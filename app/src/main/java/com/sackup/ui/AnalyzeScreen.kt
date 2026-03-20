@@ -7,6 +7,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +34,7 @@ fun AnalyzeScreen(
     summary: AnalyzeSummary?,
     isLoading: Boolean,
     onSyncNow: () -> Unit,
+    onExport: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
@@ -42,6 +44,13 @@ fun AnalyzeScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (summary != null && !isLoading) {
+                        IconButton(onClick = onExport) {
+                            Icon(Icons.Default.Share, contentDescription = "Export report")
+                        }
                     }
                 }
             )
