@@ -5,11 +5,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Environment
 import android.os.IBinder
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.documentfile.provider.DocumentFile
 import com.google.gson.Gson
@@ -21,8 +22,17 @@ import com.sackup.data.BackupRepository
 import com.sackup.data.LogEntry
 import com.sackup.util.formatBytes
 import kotlinx.coroutines.*
-import java.io.File
 import java.util.UUID
+
+/**
+ * Represents a file discovered via MediaStore that needs to be backed up.
+ */
+private data class MediaFileInfo(
+    val uri: Uri,           // content:// URI to read from
+    val name: String,       // display name e.g. "IMG_001.jpg"
+    val size: Long,         // file size in bytes
+    val drivePath: String   // relative path on drive e.g. "DCIM/Camera"
+)
 
 class BackupService : Service() {
 
@@ -169,31 +179,19 @@ class BackupService : Service() {
 
         log("INFO", group.name, "Drive folder: ${group.driveFolder}")
 
-        // Collect all files to copy (recursively)
-        // Each entry: file, relative path from drive folder root (e.g. "DCIM/Camera")
-        val filesToCopy = mutableListOf<Pair<File, String>>()
+        // Collect all files via MediaStore
+        val filesToCopy = mutableListOf<MediaFileInfo>()
 
         for (folderPath in phoneFolders) {
             if (cancelled) break
-            val phoneDir = File(Environment.getExternalStorageDirectory(), folderPath)
-            if (!phoneDir.exists() || !phoneDir.isDirectory) {
-                log("WARN", group.name, "Phone folder not found: $folderPath")
-                continue
-            }
             val topName = folderPath.replace("/", "_")
-            var count = 0
-            phoneDir.walk().filter { it.isFile }.forEach { file ->
-                // Relative path within the phone folder (e.g. "Camera/IMG_001.jpg" inside DCIM)
-                val relativeDir = file.parentFile?.toRelativeString(phoneDir) ?: ""
-                val drivePath = if (relativeDir.isEmpty()) topName else "$topName/$relativeDir"
-                filesToCopy.add(Pair(file, drivePath))
-                count++
-            }
-            log("INFO", group.name, "Found $count files in $folderPath")
+            val files = queryMediaStoreFiles(folderPath, topName)
+            log("INFO", group.name, "Found ${files.size} files in $folderPath")
+            filesToCopy.addAll(files)
         }
 
         totalFiles = filesToCopy.size
-        totalBytes = filesToCopy.sumOf { it.first.length() }
+        totalBytes = filesToCopy.sumOf { it.size }
         log("INFO", group.name, "Total: $totalFiles files, ${formatBytes(totalBytes)}")
 
         if (filesToCopy.isEmpty()) {
@@ -203,7 +201,6 @@ class BackupService : Service() {
         }
 
         // Scan existing files on drive to skip already-backed-up files
-        // Key: drive subfolder path (e.g. "DCIM/Camera"), Value: map of filename → size
         val existingFiles = mutableMapOf<String, MutableMap<String, Long>>()
         fun scanDriveDir(docDir: DocumentFile, path: String) {
             for (f in docDir.listFiles()) {
@@ -228,29 +225,29 @@ class BackupService : Service() {
         var copiedSize = 0L
         val startTime = System.currentTimeMillis()
 
-        for ((file, subFolder) in filesToCopy) {
+        for (fileInfo in filesToCopy) {
             if (cancelled) {
                 log("INFO", group.name, "Backup cancelled by user")
                 break
             }
 
-            currentFileName = file.name
+            currentFileName = fileInfo.name
 
             // Check if already exists on drive (same name and size = skip)
-            val existing = existingFiles[subFolder]
-            if (existing != null && existing[file.name] == file.length()) {
+            val existing = existingFiles[fileInfo.drivePath]
+            if (existing != null && existing[fileInfo.name] == fileInfo.size) {
                 skippedFiles++
                 completedFiles++
                 updateProgress()
                 continue
             }
 
-            // Get or create subfolder path on drive (may be nested, e.g. "DCIM/Camera")
-            val subDir = getOrCreatePath(driveFolder, subFolder)
+            // Get or create subfolder path on drive
+            val subDir = getOrCreatePath(driveFolder, fileInfo.drivePath)
             if (subDir == null) {
-                val msg = "Could not create subfolder '$subFolder' on drive"
+                val msg = "Could not create subfolder '${fileInfo.drivePath}' on drive"
                 log("ERROR", group.name, msg)
-                errors.add("${file.name}: $msg")
+                errors.add("${fileInfo.name}: $msg")
                 failedFiles++
                 completedFiles++
                 updateProgress()
@@ -259,24 +256,24 @@ class BackupService : Service() {
 
             // Copy the file
             try {
-                copyFile(file, subDir)
+                copyFile(fileInfo, subDir)
                 copiedCount++
-                copiedSize += file.length()
-                copiedBytes += file.length()
+                copiedSize += fileInfo.size
+                copiedBytes += fileInfo.size
             } catch (e: Exception) {
                 val msg = e.message ?: "Unknown error"
-                log("ERROR", group.name, "Failed to copy ${file.name}: $msg")
-                errors.add("${file.name}: $msg")
+                log("ERROR", group.name, "Failed to copy ${fileInfo.name}: $msg")
+                errors.add("${fileInfo.name}: $msg")
                 failedFiles++
                 // Try to clean up partial file
                 try {
-                    subDir.findFile(file.name)?.delete()
+                    subDir.findFile(fileInfo.name)?.delete()
                 } catch (_: Exception) {}
             }
 
             completedFiles++
             updateProgress()
-            updateNotification("Copying: ${file.name} ($completedFiles/$totalFiles)")
+            updateNotification("Copying: ${fileInfo.name} ($completedFiles/$totalFiles)")
         }
 
         val elapsed = System.currentTimeMillis() - startTime
@@ -306,6 +303,87 @@ class BackupService : Service() {
         finishBackup(group)
     }
 
+    /**
+     * Query MediaStore for all files whose RELATIVE_PATH starts with the given folder.
+     * e.g. folderPath="DCIM" matches RELATIVE_PATH "DCIM/", "DCIM/Camera/", etc.
+     * Returns MediaFileInfo with drive paths like "DCIM/Camera" (topName replaces / with _
+     * at the top level, subfolders preserved).
+     */
+    private fun queryMediaStoreFiles(folderPath: String, topName: String): List<MediaFileInfo> {
+        val results = mutableListOf<MediaFileInfo>()
+        val resolver = contentResolver
+
+        // Query MediaStore.Files which covers all file types
+        val collection = MediaStore.Files.getContentUri("external")
+
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.RELATIVE_PATH
+        )
+
+        // RELATIVE_PATH looks like "DCIM/Camera/" — match anything starting with our folder
+        // Use trailing / to avoid matching e.g. "DCIM2" when looking for "DCIM"
+        val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        val selectionArgs = arrayOf("$folderPath/%")
+
+        resolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            val pathCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.RELATIVE_PATH)
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
+                val name = cursor.getString(nameCol) ?: continue
+                val size = cursor.getLong(sizeCol)
+                val relativePath = cursor.getString(pathCol) ?: continue
+
+                val contentUri = ContentUris.withAppendedId(collection, id)
+
+                // relativePath is e.g. "DCIM/Camera/" — strip the top folder and trailing /
+                // to get the sub-path, then prepend topName
+                val subPath = relativePath.removePrefix("$folderPath/").trimEnd('/')
+                val drivePath = if (subPath.isEmpty()) topName else "$topName/$subPath"
+
+                results.add(MediaFileInfo(
+                    uri = contentUri,
+                    name = name,
+                    size = size,
+                    drivePath = drivePath
+                ))
+            }
+        }
+
+        // Also match files directly in the folder (RELATIVE_PATH = "DCIM/" exactly)
+        val directSelection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        val directArgs = arrayOf("$folderPath/")
+
+        resolver.query(collection, projection, directSelection, directArgs, null)?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(idCol)
+                val name = cursor.getString(nameCol) ?: continue
+                val size = cursor.getLong(sizeCol)
+
+                val contentUri = ContentUris.withAppendedId(collection, id)
+
+                results.add(MediaFileInfo(
+                    uri = contentUri,
+                    name = name,
+                    size = size,
+                    drivePath = topName
+                ))
+            }
+        }
+
+        return results
+    }
+
     private fun getOrCreatePath(root: DocumentFile, path: String): DocumentFile? {
         var current = root
         for (segment in path.split("/")) {
@@ -315,12 +393,19 @@ class BackupService : Service() {
         return current
     }
 
-    private fun copyFile(source: File, destDir: DocumentFile) {
-        // Determine MIME type
+    private fun copyFile(source: MediaFileInfo, destDir: DocumentFile) {
+        // Determine MIME type from file name
         val mimeType = when {
             source.name.endsWith(".jpg", true) || source.name.endsWith(".jpeg", true) -> "image/jpeg"
             source.name.endsWith(".png", true) -> "image/png"
+            source.name.endsWith(".gif", true) -> "image/gif"
+            source.name.endsWith(".webp", true) -> "image/webp"
             source.name.endsWith(".mp4", true) -> "video/mp4"
+            source.name.endsWith(".3gp", true) -> "video/3gpp"
+            source.name.endsWith(".mkv", true) -> "video/x-matroska"
+            source.name.endsWith(".mov", true) -> "video/quicktime"
+            source.name.endsWith(".mp3", true) -> "audio/mpeg"
+            source.name.endsWith(".m4a", true) -> "audio/mp4"
             source.name.endsWith(".pdf", true) -> "application/pdf"
             else -> "application/octet-stream"
         }
@@ -334,14 +419,15 @@ class BackupService : Service() {
         val resolver = contentResolver
         val outputStream = resolver.openOutputStream(destFile.uri)
             ?: throw Exception("Could not open output stream")
+        val inputStream = resolver.openInputStream(source.uri)
+            ?: throw Exception("Could not read source file")
 
         outputStream.use { out ->
-            source.inputStream().use { input ->
+            inputStream.use { input ->
                 val buffer = ByteArray(BUFFER_SIZE)
                 var bytesRead: Int
                 while (input.read(buffer).also { bytesRead = it } != -1) {
                     if (cancelled) {
-                        // Clean up partial file
                         destFile.delete()
                         throw Exception("Cancelled")
                     }
@@ -352,10 +438,9 @@ class BackupService : Service() {
 
         // Verify file size
         val destSize = destFile.length()
-        val sourceSize = source.length()
-        if (destSize != sourceSize) {
+        if (destSize != source.size) {
             destFile.delete()
-            throw Exception("Size mismatch after copy: expected ${formatBytes(sourceSize)}, got ${formatBytes(destSize)}")
+            throw Exception("Size mismatch after copy: expected ${formatBytes(source.size)}, got ${formatBytes(destSize)}")
         }
     }
 
