@@ -49,6 +49,7 @@ fun ProgressScreen(
     val failedList = BackupService.failedFilesList
     val speed = BackupService.bytesPerSecond
     val startTime = BackupService.startTimeMillis
+    val endTime = BackupService.endTimeMillis
     val phase = BackupService.currentPhase
 
     Scaffold(
@@ -191,10 +192,10 @@ fun ProgressScreen(
                     ) {
                         StatRow("Files copied", "$copied")
                         StatRow("Data copied", formatBytes(copiedBytes))
-                        if (startTime > 0) {
-                            val elapsed = System.currentTimeMillis() - startTime
+                        if (startTime > 0 && endTime > startTime) {
+                            val elapsed = endTime - startTime
                             StatRow("Time taken", formatDuration(elapsed))
-                            if (elapsed > 0 && copiedBytes > 0) {
+                            if (copiedBytes > 0) {
                                 StatRow("Average speed", "${formatBytes(copiedBytes * 1000 / elapsed)}/s")
                             }
                         }

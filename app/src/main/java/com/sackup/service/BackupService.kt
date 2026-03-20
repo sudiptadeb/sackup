@@ -45,6 +45,7 @@ class BackupService : Service() {
         @Volatile var isDone = false
         @Volatile var failedFilesList: List<String> = emptyList()
         @Volatile var startTimeMillis = 0L
+        @Volatile var endTimeMillis = 0L
         @Volatile var bytesPerSecond = 0L
 
         fun start(context: Context, groupId: Long, driveUri: Uri) {
@@ -78,6 +79,7 @@ class BackupService : Service() {
             isDone = false
             failedFilesList = emptyList()
             startTimeMillis = 0L
+            endTimeMillis = 0L
             bytesPerSecond = 0L
         }
     }
@@ -289,6 +291,7 @@ class BackupService : Service() {
     }
 
     private fun finishBackup() {
+        endTimeMillis = System.currentTimeMillis()
         isDone = true
         isRunning = false
         currentFileName = ""
