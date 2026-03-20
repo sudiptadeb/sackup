@@ -6,6 +6,7 @@ class BackupRepository(context: Context) {
     private val db = AppDatabase.get(context)
     private val groupDao = db.backupGroupDao()
     private val logDao = db.logEntryDao()
+    private val manifestDao = db.manifestEntryDao()
 
     // Backup Groups
     suspend fun getAllGroups(): List<BackupGroup> = groupDao.getAll()
@@ -53,4 +54,17 @@ class BackupRepository(context: Context) {
         val thirtyDaysAgo = System.currentTimeMillis() - (30L * 24 * 60 * 60 * 1000)
         logDao.deleteOlderThan(thirtyDaysAgo)
     }
+
+    // Manifest
+    suspend fun getManifestForGroup(groupId: Long): List<ManifestEntry> = manifestDao.getByGroup(groupId)
+    suspend fun getSuccessfulManifest(groupId: Long): List<ManifestEntry> = manifestDao.getSuccessfulByGroup(groupId)
+    suspend fun getSuccessfulManifestByFolder(groupId: Long, phoneFolder: String): List<ManifestEntry> =
+        manifestDao.getSuccessfulByFolder(groupId, phoneFolder)
+    suspend fun rebuildManifest(groupId: Long, entries: List<ManifestEntry>) {
+        manifestDao.deleteByGroup(groupId)
+        if (entries.isNotEmpty()) {
+            manifestDao.insertAll(entries)
+        }
+    }
+    suspend fun removeManifestEntries(ids: List<Long>) = manifestDao.deleteByIds(ids)
 }
