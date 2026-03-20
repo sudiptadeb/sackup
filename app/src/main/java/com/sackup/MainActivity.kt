@@ -19,6 +19,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import android.content.ContentUris
 import android.provider.MediaStore
 import com.sackup.data.BackupGroup
 import com.sackup.data.BackupRepository
@@ -134,6 +135,9 @@ class MainActivity : ComponentActivity() {
                             },
                             onClearSpace = { group ->
                                 navController.navigate(Routes.clearSpace(group.id))
+                            },
+                            onAnalyze = { group ->
+                                navController.navigate(Routes.analyze(group.id))
                             },
                             onViewLogs = {
                                 navController.navigate(Routes.LOGS)
@@ -289,7 +293,151 @@ class MainActivity : ComponentActivity() {
                             onBack = { navController.popBackStack() }
                         )
                     }
+
+                    composable(
+                        Routes.ANALYZE,
+                        arguments = listOf(navArgument("groupId") { type = NavType.LongType })
+                    ) { backStackEntry ->
+                        val groupId = backStackEntry.arguments?.getLong("groupId") ?: return@composable
+
+                        var analyzeSummary by remember { mutableStateOf<AnalyzeSummary?>(null) }
+                        var isLoading by remember { mutableStateOf(true) }
+
+                        LaunchedEffect(groupId) {
+                            val group = repo.getGroup(groupId)
+                            if (group != null) {
+                                val phoneFolders: List<String> = try {
+                                    Gson().fromJson(group.phoneFolders, object : TypeToken<List<String>>() {}.type)
+                                } catch (_: Exception) { emptyList() }
+
+                                val results = withContext(Dispatchers.IO) {
+                                    analyzeGroup(group, phoneFolders)
+                                }
+
+                                analyzeSummary = AnalyzeSummary(
+                                    groupName = group.name,
+                                    driveFolder = group.driveFolder,
+                                    folders = results,
+                                    driveConnected = driveConnected
+                                )
+                            }
+                            isLoading = false
+                        }
+
+                        AnalyzeScreen(
+                            summary = analyzeSummary,
+                            isLoading = isLoading,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    /**
+     * Analyze a backup group: compare phone files (MediaStore) with drive files (SAF)
+     * and return per-folder breakdown.
+     */
+    private fun analyzeGroup(group: BackupGroup, phoneFolders: List<String>): List<AnalyzeResult> {
+        val results = mutableListOf<AnalyzeResult>()
+
+        for (folderPath in phoneFolders) {
+            val topName = folderPath.replace("/", "_")
+
+            // Get phone files from MediaStore
+            val phoneFiles = queryPhoneFiles(folderPath)  // set of "name|size"
+            val phoneFileMap = mutableMapOf<String, Long>() // "name|size" → size
+            for ((name, size) in phoneFiles) {
+                phoneFileMap["$name|$size"] = size
+            }
+
+            // Get drive files if connected
+            val driveFileMap = mutableMapOf<String, Long>() // "name|size" → size
+            val uri = driveUri
+            if (uri != null && driveConnected) {
+                val driveRoot = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)
+                val groupDir = driveRoot?.findFile(group.driveFolder)
+                val subDir = groupDir?.findFile(topName)
+                if (subDir != null && subDir.isDirectory) {
+                    scanDocFiles(subDir, driveFileMap)
+                }
+            } else {
+                // Use manifest as fallback when drive not connected
+                val manifest = kotlinx.coroutines.runBlocking {
+                    repo.getManifestForGroup(group.id)
+                }
+                for (entry in manifest.filter { it.phoneFolder == folderPath }) {
+                    driveFileMap["${entry.fileName}|${entry.fileSize}"] = entry.fileSize
+                }
+            }
+
+            val phoneSet = phoneFileMap.keys
+            val driveSet = driveFileMap.keys
+
+            val onBoth = phoneSet.intersect(driveSet)
+            val onPhoneOnly = phoneSet - driveSet
+            val onDriveOnly = driveSet - phoneSet
+
+            results.add(AnalyzeResult(
+                phoneFolder = folderPath,
+                onPhoneOnly = onPhoneOnly.size,
+                onPhoneOnlySize = onPhoneOnly.sumOf { phoneFileMap[it] ?: 0L },
+                backedUp = onBoth.size,
+                backedUpSize = onBoth.sumOf { phoneFileMap[it] ?: 0L },
+                onDriveOnly = onDriveOnly.size,
+                onDriveOnlySize = onDriveOnly.sumOf { driveFileMap[it] ?: 0L },
+                totalOnPhone = phoneSet.size,
+                totalOnDrive = driveSet.size
+            ))
+        }
+
+        return results
+    }
+
+    /** Query MediaStore for all files in a folder. Returns list of (name, size) pairs. */
+    private fun queryPhoneFiles(folderPath: String): List<Pair<String, Long>> {
+        val results = mutableListOf<Pair<String, Long>>()
+        val collection = MediaStore.Files.getContentUri("external")
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.SIZE
+        )
+
+        // Files in subfolders
+        val subSel = "${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        contentResolver.query(collection, projection, subSel, arrayOf("$folderPath/%"), null)?.use { cursor ->
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameCol) ?: continue
+                results.add(Pair(name, cursor.getLong(sizeCol)))
+            }
+        }
+
+        // Files directly in folder
+        val directSel = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
+        contentResolver.query(collection, projection, directSel, arrayOf("$folderPath/"), null)?.use { cursor ->
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameCol) ?: continue
+                results.add(Pair(name, cursor.getLong(sizeCol)))
+            }
+        }
+
+        return results
+    }
+
+    /** Recursively scan a DocumentFile directory and collect "name|size" → size entries. */
+    private fun scanDocFiles(dir: androidx.documentfile.provider.DocumentFile, map: MutableMap<String, Long>) {
+        for (f in dir.listFiles()) {
+            if (f.isDirectory) {
+                scanDocFiles(f, map)
+            } else if (f.isFile) {
+                val name = f.name ?: continue
+                val size = f.length()
+                map["$name|$size"] = size
             }
         }
     }
