@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sackup.service.BackupService
 import com.sackup.util.formatBytes
+import com.sackup.util.formatDuration
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -46,6 +47,8 @@ fun ProgressScreen(
     val copiedBytes = BackupService.copiedBytes
     val totalBytes = BackupService.totalBytes
     val failedList = BackupService.failedFilesList
+    val speed = BackupService.bytesPerSecond
+    val startTime = BackupService.startTimeMillis
 
     Scaffold(
         topBar = {
@@ -110,8 +113,19 @@ fun ProgressScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         StatRow("Files", "$completed / $total")
-                        StatRow("Copied", formatBytes(copiedBytes))
-                        StatRow("Total", formatBytes(totalBytes))
+                        StatRow("Copied", "${formatBytes(copiedBytes)} / ${formatBytes(totalBytes)}")
+                        if (speed > 0) {
+                            StatRow("Speed", "${formatBytes(speed)}/s")
+                            val remaining = totalBytes - copiedBytes
+                            if (remaining > 0) {
+                                val etaMillis = remaining * 1000 / speed
+                                StatRow("Time remaining", "~${formatDuration(etaMillis)}")
+                            }
+                        }
+                        if (startTime > 0) {
+                            val elapsed = System.currentTimeMillis() - startTime
+                            StatRow("Elapsed", formatDuration(elapsed))
+                        }
                         if (skipped > 0) StatRow("Skipped (already on drive)", "$skipped")
                         if (failed > 0) StatRow("Failed", "$failed")
                     }
@@ -149,6 +163,13 @@ fun ProgressScreen(
                     ) {
                         StatRow("Files copied", "$copied")
                         StatRow("Data copied", formatBytes(copiedBytes))
+                        if (startTime > 0) {
+                            val elapsed = System.currentTimeMillis() - startTime
+                            StatRow("Time taken", formatDuration(elapsed))
+                            if (elapsed > 0 && copiedBytes > 0) {
+                                StatRow("Average speed", "${formatBytes(copiedBytes * 1000 / elapsed)}/s")
+                            }
+                        }
                         if (skipped > 0) StatRow("Already on drive", "$skipped")
                         if (failed > 0) StatRow("Failed", "$failed")
                     }

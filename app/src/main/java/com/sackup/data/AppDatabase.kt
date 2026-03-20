@@ -5,10 +5,15 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [BackupGroup::class, LogEntry::class], version = 1, exportSchema = false)
+@Database(
+    entities = [BackupGroup::class, LogEntry::class, ManifestEntry::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun backupGroupDao(): BackupGroupDao
     abstract fun logEntryDao(): LogEntryDao
+    abstract fun manifestEntryDao(): ManifestEntryDao
 
     companion object {
         @Volatile
@@ -20,7 +25,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "sackup.db"
-                ).build().also { INSTANCE = it }
+                ).fallbackToDestructiveMigration().build().also { INSTANCE = it }
             }
         }
     }

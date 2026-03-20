@@ -1,5 +1,9 @@
 package com.sackup.ui
 
+import android.net.Uri
+import android.os.Environment
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,8 +31,19 @@ fun SetupScreen(
 ) {
     var name by remember { mutableStateOf(initialName) }
     var driveFolder by remember { mutableStateOf(initialDriveFolder) }
-    var phoneFolders by remember { mutableStateOf(initialPhoneFolders.toMutableList().ifEmpty { mutableListOf("") }) }
-    var newFolder by remember { mutableStateOf("") }
+    var phoneFolders by remember { mutableStateOf(initialPhoneFolders.toMutableList().ifEmpty { mutableListOf() }) }
+
+    // SAF folder picker — extract relative path from internal storage
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val relativePath = extractRelativePath(uri)
+            if (relativePath != null && relativePath !in phoneFolders) {
+                phoneFolders = (phoneFolders + relativePath).toMutableList()
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -77,26 +93,35 @@ fun SetupScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "Relative paths from internal storage (e.g. DCIM, Pictures, Download, WhatsApp/Media)",
+                "Select folders from your phone to back up",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             for (i in phoneFolders.indices) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    OutlinedTextField(
-                        value = phoneFolders[i],
-                        onValueChange = { value ->
-                            phoneFolders = phoneFolders.toMutableList().apply { set(i, value) }
-                        },
-                        placeholder = { Text("e.g. DCIM") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
                     )
-                    if (phoneFolders.size > 1) {
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            phoneFolders[i],
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
                         IconButton(onClick = {
                             phoneFolders = phoneFolders.toMutableList().apply { removeAt(i) }
                         }) {
@@ -106,15 +131,21 @@ fun SetupScreen(
                 }
             }
 
+            // Initial URI pointing to internal storage root
+            val storageUri = Uri.Builder()
+                .scheme("content")
+                .authority("com.android.externalstorage.documents")
+                .appendPath("document")
+                .appendPath("primary:")
+                .build()
+
             OutlinedButton(
-                onClick = {
-                    phoneFolders = phoneFolders.toMutableList().apply { add("") }
-                },
+                onClick = { folderPickerLauncher.launch(storageUri) },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Add Phone Folder")
+                Text("Select Phone Folder")
             }
 
             Spacer(Modifier.height(16.dp))
@@ -127,7 +158,7 @@ fun SetupScreen(
                         onSave(name, folders, driveFolder)
                     }
                 },
-                enabled = name.isNotBlank() && driveFolder.isNotBlank() && phoneFolders.any { it.isNotBlank() },
+                enabled = name.isNotBlank() && driveFolder.isNotBlank() && phoneFolders.isNotEmpty(),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp)
@@ -136,4 +167,18 @@ fun SetupScreen(
             }
         }
     }
+}
+
+/**
+ * Extracts the relative path from a SAF document tree URI.
+ * e.g. content://com.android.externalstorage.documents/tree/primary%3ADCIM → "DCIM"
+ * e.g. content://com.android.externalstorage.documents/tree/primary%3AWhatsApp%2FMedia → "WhatsApp/Media"
+ */
+private fun extractRelativePath(uri: Uri): String? {
+    val treeId = uri.lastPathSegment ?: return null
+    // Format is "primary:relative/path" for internal storage
+    val colonIndex = treeId.indexOf(':')
+    if (colonIndex < 0) return null
+    val path = treeId.substring(colonIndex + 1)
+    return path.ifBlank { null }
 }

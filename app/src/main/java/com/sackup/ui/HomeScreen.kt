@@ -19,10 +19,13 @@ import com.sackup.util.formatBytes
 import java.text.SimpleDateFormat
 import java.util.*
 
+import com.sackup.util.FolderStats
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     groups: List<BackupGroup>,
+    groupStats: Map<Long, FolderStats>,
     driveUri: Uri?,
     driveConnected: Boolean,
     onPickDrive: () -> Unit,
@@ -30,6 +33,8 @@ fun HomeScreen(
     onEditGroup: (BackupGroup) -> Unit,
     onAddGroup: () -> Unit,
     onDeleteGroup: (BackupGroup) -> Unit,
+    onClearSpace: (BackupGroup) -> Unit,
+    onAnalyze: (BackupGroup) -> Unit,
     onViewLogs: () -> Unit,
     onViewProgress: () -> Unit,
 ) {
@@ -102,10 +107,13 @@ fun HomeScreen(
             items(groups, key = { it.id }) { group ->
                 BackupGroupCard(
                     group = group,
+                    stats = groupStats[group.id],
                     driveConnected = driveConnected,
                     onBackup = { onBackup(group) },
                     onEdit = { onEditGroup(group) },
-                    onDelete = { onDeleteGroup(group) }
+                    onDelete = { onDeleteGroup(group) },
+                    onClearSpace = { onClearSpace(group) },
+                    onAnalyze = { onAnalyze(group) }
                 )
             }
 
@@ -175,10 +183,13 @@ fun DriveStatusCard(connected: Boolean, driveUri: Uri?, onPickDrive: () -> Unit)
 @Composable
 fun BackupGroupCard(
     group: BackupGroup,
+    stats: FolderStats?,
     driveConnected: Boolean,
     onBackup: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onClearSpace: () -> Unit = {},
+    onAnalyze: () -> Unit = {},
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -207,6 +218,14 @@ fun BackupGroupCard(
                             onClick = { showMenu = false; onEdit() }
                         )
                         DropdownMenuItem(
+                            text = { Text("Analyze") },
+                            onClick = { showMenu = false; onAnalyze() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Free Up Space") },
+                            onClick = { showMenu = false; onClearSpace() }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Delete") },
                             onClick = { showMenu = false; onDelete() }
                         )
@@ -219,6 +238,16 @@ fun BackupGroupCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            // Folder stats from phone
+            if (stats != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "${stats.fileCount} files on phone · ${formatBytes(stats.totalSize)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
 
             if (group.lastBackupTime > 0) {
                 Spacer(Modifier.height(4.dp))
