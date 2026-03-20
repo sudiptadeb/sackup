@@ -44,6 +44,11 @@ data class FolderDiff(
     val totalOnDrive: Int
 )
 
+data class DriveFileInfo(
+    val size: Long,
+    val documentId: String
+)
+
 data class SnapshotResult(
     val filesToCopy: List<PhoneFile>,
     val totalBytesToCopy: Long,
@@ -51,8 +56,8 @@ data class SnapshotResult(
     val perFolder: List<FolderDiff>,
     // Cached for manifest rebuild
     val allPhoneFiles: List<PhoneFile>,
-    val driveFileCache: Map<String, Map<String, Long>>,  // drivePath → (name → size)
-    val dirDocIds: Map<String, String>                    // drivePath → documentId
+    val driveFileCache: Map<String, Map<String, DriveFileInfo>>,  // drivePath → (name → info)
+    val dirDocIds: Map<String, String>                             // drivePath → documentId
 )
 
 data class CopyResult(
@@ -84,7 +89,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         val groupDirDocId = findChildDocId(treeUri, rootDocId, groupDriveFolder)
 
         // 2. Scan drive using DocumentsContract cursors (fast)
-        val driveFileCache = mutableMapOf<String, MutableMap<String, Long>>()
+        val driveFileCache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
         val dirDocIds = mutableMapOf<String, String>()
 
         if (groupDirDocId != null) {
@@ -115,26 +120,36 @@ class BackupEngine(private val resolver: ContentResolver) {
             val phoneFolderFiles = allPhoneFiles.filter { it.phoneFolder == folderPath }
 
             // Collect all drive files under this top folder
-            val driveKeys = mutableMapOf<String, Long>() // "drivePath|name" → size
+            val driveKeys = mutableMapOf<String, DriveFileInfo>() // "drivePath|name" → info
             for ((drivePath, files) in driveFileCache) {
                 if (drivePath == topName || drivePath.startsWith("$topName/")) {
-                    for ((name, size) in files) {
-                        driveKeys["$drivePath|$name"] = size
+                    for ((name, info) in files) {
+                        driveKeys["$drivePath|$name"] = info
                     }
                 }
             }
 
-            val phoneKeys = phoneFolderFiles.associateBy { "${it.drivePath}|${it.name}" }
+            val phoneKeyMap = phoneFolderFiles.associateBy { "${it.drivePath}|${it.name}" }
 
             var toCopy = 0; var toCopySize = 0L
             var onDrive = 0; var onDriveSize = 0L
 
             for (pf in phoneFolderFiles) {
                 val key = "${pf.drivePath}|${pf.name}"
-                val driveSize = driveKeys[key]
-                if (driveSize != null && driveSize == pf.size) {
+                val driveInfo = driveKeys[key]
+                if (driveInfo != null && driveInfo.size == pf.size) {
+                    // Full match — file is safely on drive
                     onDrive++; onDriveSize += pf.size
                 } else {
+                    if (driveInfo != null && driveInfo.size != pf.size) {
+                        // Partial file on drive — delete it so copy can overwrite cleanly
+                        try {
+                            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, driveInfo.documentId)
+                            DocumentsContract.deleteDocument(resolver, docUri)
+                            // Remove from cache so it's not counted
+                            driveFileCache[pf.drivePath]?.remove(pf.name)
+                        } catch (_: Exception) {}
+                    }
                     toCopy++; toCopySize += pf.size
                     filesToCopy.add(pf)
                 }
@@ -142,14 +157,9 @@ class BackupEngine(private val resolver: ContentResolver) {
 
             // Drive-only files (deleted from phone)
             var driveOnly = 0; var driveOnlySize = 0L
-            for ((key, size) in driveKeys) {
-                if (key !in phoneKeys.keys.map { "${phoneKeys[it]!!.drivePath}|${phoneKeys[it]!!.name}" }.toSet()) {
-                    // Check if any phone file matches this key
-                    val parts = key.split("|", limit = 2)
-                    val matchKey = key
-                    if (phoneKeys.none { "${it.value.drivePath}|${it.value.name}" == matchKey && it.value.size == size }) {
-                        driveOnly++; driveOnlySize += size
-                    }
+            for ((key, info) in driveKeys) {
+                if (key !in phoneKeyMap) {
+                    driveOnly++; driveOnlySize += info.size
                 }
             }
 
@@ -279,8 +289,8 @@ class BackupEngine(private val resolver: ContentResolver) {
         // Files that were already on drive + successfully copied files
         for (pf in snapshot.allPhoneFiles) {
             val key = "${pf.drivePath}|${pf.name}"
-            val driveSize = snapshot.driveFileCache[pf.drivePath]?.get(pf.name)
-            val wasOnDrive = driveSize != null && driveSize == pf.size
+            val driveInfo = snapshot.driveFileCache[pf.drivePath]?.get(pf.name)
+            val wasOnDrive = driveInfo != null && driveInfo.size == pf.size
             val wasCopied = key in copiedFiles
 
             if (wasOnDrive || wasCopied) {
@@ -306,7 +316,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         treeUri: Uri,
         parentDocId: String,
         parentPath: String,
-        files: MutableMap<String, MutableMap<String, Long>>,
+        files: MutableMap<String, MutableMap<String, DriveFileInfo>>,
         dirs: MutableMap<String, String>
     ) {
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
@@ -334,7 +344,7 @@ class BackupEngine(private val resolver: ContentResolver) {
                     scanDriveCursor(treeUri, docId, childPath, files, dirs)
                 } else {
                     val size = cursor.getLong(sizeCol)
-                    files.getOrPut(parentPath) { mutableMapOf() }[name] = size
+                    files.getOrPut(parentPath) { mutableMapOf() }[name] = DriveFileInfo(size, docId)
                 }
             }
         }
