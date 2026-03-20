@@ -25,7 +25,11 @@ import com.sackup.data.LogEntry
 import com.sackup.service.BackupService
 import com.sackup.ui.*
 import com.sackup.ui.theme.SackUpTheme
+import com.sackup.util.FolderStats
+import com.sackup.util.queryFolderStats
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
@@ -33,6 +37,7 @@ class MainActivity : ComponentActivity() {
     private var driveUri by mutableStateOf<Uri?>(null)
     private var driveConnected by mutableStateOf(false)
     private var groups = mutableStateListOf<BackupGroup>()
+    private var groupStats = mutableStateMapOf<Long, FolderStats>()
     private var logs = mutableStateListOf<LogEntry>()
     private var pendingBackupGroupId: Long? = null
 
@@ -100,6 +105,7 @@ class MainActivity : ComponentActivity() {
 
                         HomeScreen(
                             groups = groups,
+                            groupStats = groupStats,
                             driveUri = driveUri,
                             driveConnected = driveConnected,
                             onPickDrive = { pickDriveLauncher.launch(null) },
@@ -221,6 +227,19 @@ class MainActivity : ComponentActivity() {
         val updated = repo.getAllGroups()
         groups.clear()
         groups.addAll(updated)
+
+        // Compute folder stats for each group in background
+        withContext(Dispatchers.IO) {
+            for (group in updated) {
+                val folders: List<String> = try {
+                    Gson().fromJson(group.phoneFolders, object : TypeToken<List<String>>() {}.type)
+                } catch (_: Exception) { emptyList() }
+                if (folders.isNotEmpty()) {
+                    val stats = queryFolderStats(contentResolver, folders)
+                    groupStats[group.id] = stats
+                }
+            }
+        }
     }
 
     private suspend fun refreshLogs() {
