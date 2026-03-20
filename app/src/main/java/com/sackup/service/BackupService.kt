@@ -169,8 +169,9 @@ class BackupService : Service() {
 
         log("INFO", group.name, "Drive folder: ${group.driveFolder}")
 
-        // Collect all files to copy
-        val filesToCopy = mutableListOf<Pair<File, String>>() // file, relative subfolder name
+        // Collect all files to copy (recursively)
+        // Each entry: file, relative path from drive folder root (e.g. "DCIM/Camera")
+        val filesToCopy = mutableListOf<Pair<File, String>>()
 
         for (folderPath in phoneFolders) {
             if (cancelled) break
@@ -179,11 +180,16 @@ class BackupService : Service() {
                 log("WARN", group.name, "Phone folder not found: $folderPath")
                 continue
             }
-            val files = phoneDir.listFiles()?.filter { it.isFile } ?: emptyList()
-            log("INFO", group.name, "Found ${files.size} files in $folderPath")
-            for (file in files) {
-                filesToCopy.add(Pair(file, folderPath.replace("/", "_")))
+            val topName = folderPath.replace("/", "_")
+            var count = 0
+            phoneDir.walk().filter { it.isFile }.forEach { file ->
+                // Relative path within the phone folder (e.g. "Camera/IMG_001.jpg" inside DCIM)
+                val relativeDir = file.parentFile?.toRelativeString(phoneDir) ?: ""
+                val drivePath = if (relativeDir.isEmpty()) topName else "$topName/$relativeDir"
+                filesToCopy.add(Pair(file, drivePath))
+                count++
             }
+            log("INFO", group.name, "Found $count files in $folderPath")
         }
 
         totalFiles = filesToCopy.size
@@ -197,19 +203,23 @@ class BackupService : Service() {
         }
 
         // Scan existing files on drive to skip already-backed-up files
-        val existingFiles = mutableMapOf<String, MutableMap<String, Long>>() // subfolder -> (name -> size)
+        // Key: drive subfolder path (e.g. "DCIM/Camera"), Value: map of filename → size
+        val existingFiles = mutableMapOf<String, MutableMap<String, Long>>()
+        fun scanDriveDir(docDir: DocumentFile, path: String) {
+            for (f in docDir.listFiles()) {
+                if (f.isDirectory) {
+                    scanDriveDir(f, "$path/${f.name ?: ""}")
+                } else if (f.isFile) {
+                    existingFiles.getOrPut(path) { mutableMapOf() }[f.name ?: ""] = f.length()
+                }
+            }
+        }
         for (folderPath in phoneFolders) {
             if (cancelled) break
             val subName = folderPath.replace("/", "_")
             val subDir = driveFolder.findFile(subName)
             if (subDir != null && subDir.isDirectory) {
-                val map = mutableMapOf<String, Long>()
-                for (f in subDir.listFiles()) {
-                    if (f.isFile) {
-                        map[f.name ?: ""] = f.length()
-                    }
-                }
-                existingFiles[subName] = map
+                scanDriveDir(subDir, subName)
             }
         }
 
@@ -235,9 +245,8 @@ class BackupService : Service() {
                 continue
             }
 
-            // Get or create subfolder on drive
-            val subDir = driveFolder.findFile(subFolder)
-                ?: driveFolder.createDirectory(subFolder)
+            // Get or create subfolder path on drive (may be nested, e.g. "DCIM/Camera")
+            val subDir = getOrCreatePath(driveFolder, subFolder)
             if (subDir == null) {
                 val msg = "Could not create subfolder '$subFolder' on drive"
                 log("ERROR", group.name, msg)
@@ -295,6 +304,15 @@ class BackupService : Service() {
         )
 
         finishBackup(group)
+    }
+
+    private fun getOrCreatePath(root: DocumentFile, path: String): DocumentFile? {
+        var current = root
+        for (segment in path.split("/")) {
+            if (segment.isBlank()) continue
+            current = current.findFile(segment) ?: current.createDirectory(segment) ?: return null
+        }
+        return current
     }
 
     private fun copyFile(source: File, destDir: DocumentFile) {
