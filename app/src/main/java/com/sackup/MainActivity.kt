@@ -274,11 +274,10 @@ class MainActivity : ComponentActivity() {
                             groupName = group?.name ?: "",
                             folders = folders,
                             isLoading = isLoading,
-                            onDeleteOldest = { phoneFolder, count, entries ->
+                            onDeleteEntries = { entries ->
                                 scope.launch {
                                     val deleted = deleteFilesFromPhone(entries)
                                     if (deleted > 0) {
-                                        // Remove deleted entries from manifest
                                         repo.removeManifestEntries(entries.take(deleted).map { it.id })
                                         Toast.makeText(
                                             this@MainActivity,
@@ -286,10 +285,13 @@ class MainActivity : ComponentActivity() {
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
-                                    // Refresh the clear space data
+                                    // Refresh
                                     navController.popBackStack()
                                     navController.navigate(Routes.clearSpace(groupId))
                                 }
+                            },
+                            resolveFileUri = { entry ->
+                                resolveManifestFileUri(entry)
                             },
                             onBack = { navController.popBackStack() }
                         )
@@ -356,6 +358,26 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * Resolve a manifest entry to its MediaStore content URI for thumbnail loading.
+     */
+    private fun resolveManifestFileUri(entry: ManifestEntry): Uri? {
+        val collection = MediaStore.Files.getContentUri("external")
+        val projection = arrayOf(MediaStore.Files.FileColumns._ID)
+        val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
+                "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
+                "${MediaStore.Files.FileColumns.SIZE} = ?"
+        val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
+
+        contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
+                return android.content.ContentUris.withAppendedId(collection, id)
+            }
+        }
+        return null
     }
 
     private fun checkDriveConnection() {

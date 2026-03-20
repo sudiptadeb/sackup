@@ -70,4 +70,7 @@ dependencies {
 
     // Gson for simple JSON serialization
     implementation("com.google.code.gson:gson:2.11.0")
+
+    // Coil for image loading/thumbnails
+    implementation("io.coil-kt:coil-compose:2.7.0")
 }
