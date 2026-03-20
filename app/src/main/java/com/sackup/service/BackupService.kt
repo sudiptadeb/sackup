@@ -65,6 +65,8 @@ class BackupService : Service() {
         @Volatile var isDone = false
         @Volatile var lastError = ""
         @Volatile var failedFilesList: List<String> = emptyList()
+        @Volatile var startTimeMillis = 0L
+        @Volatile var bytesPerSecond = 0L     // rolling speed estimate
 
         fun start(context: Context, groupId: Long, driveUri: Uri) {
             val intent = Intent(context, BackupService::class.java).apply {
@@ -96,6 +98,8 @@ class BackupService : Service() {
             isDone = false
             lastError = ""
             failedFilesList = emptyList()
+            startTimeMillis = 0L
+            bytesPerSecond = 0L
         }
     }
 
@@ -228,6 +232,7 @@ class BackupService : Service() {
         var copiedCount = 0
         var copiedSize = 0L
         val startTime = System.currentTimeMillis()
+        startTimeMillis = startTime
 
         for (fileInfo in filesToCopy) {
             if (cancelled) {
@@ -277,6 +282,13 @@ class BackupService : Service() {
 
             completedFiles++
             updateProgress()
+
+            // Update speed estimate
+            val elapsed = System.currentTimeMillis() - startTime
+            if (elapsed > 0 && copiedBytes > 0) {
+                bytesPerSecond = copiedBytes * 1000 / elapsed
+            }
+
             updateNotification("Copying: ${fileInfo.name} ($completedFiles/$totalFiles)")
         }
 

@@ -34,6 +34,7 @@ fun HomeScreen(
     onAddGroup: () -> Unit,
     onDeleteGroup: (BackupGroup) -> Unit,
     onClearSpace: (BackupGroup) -> Unit,
+    onAnalyze: (BackupGroup) -> Unit,
     onViewLogs: () -> Unit,
     onViewProgress: () -> Unit,
 ) {
@@ -111,7 +112,8 @@ fun HomeScreen(
                     onBackup = { onBackup(group) },
                     onEdit = { onEditGroup(group) },
                     onDelete = { onDeleteGroup(group) },
-                    onClearSpace = { onClearSpace(group) }
+                    onClearSpace = { onClearSpace(group) },
+                    onAnalyze = { onAnalyze(group) }
                 )
             }
 
@@ -187,6 +189,7 @@ fun BackupGroupCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onClearSpace: () -> Unit = {},
+    onAnalyze: () -> Unit = {},
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -213,6 +216,10 @@ fun BackupGroupCard(
                         DropdownMenuItem(
                             text = { Text("Edit") },
                             onClick = { showMenu = false; onEdit() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Analyze") },
+                            onClick = { showMenu = false; onAnalyze() }
                         )
                         DropdownMenuItem(
                             text = { Text("Free Up Space") },
