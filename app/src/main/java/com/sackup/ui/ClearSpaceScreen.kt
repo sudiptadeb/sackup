@@ -45,6 +45,7 @@ fun ClearSpaceScreen(
     groupName: String,
     folders: List<FolderClearInfo>,
     isLoading: Boolean,
+    loadingStatus: String = "",
     onDeleteEntries: (entries: List<ManifestEntry>) -> Unit,
     fileUris: Map<Long, Uri>,  // manifest entry id → content URI (pre-resolved)
     onBack: () -> Unit,
@@ -67,6 +68,7 @@ fun ClearSpaceScreen(
             groupName = groupName,
             folders = folders,
             isLoading = isLoading,
+            loadingStatus = loadingStatus,
             onViewFolder = { viewingFolder = it },
             onQuickDelete = { entries -> onDeleteEntries(entries) },
             onBack = onBack
@@ -80,6 +82,7 @@ private fun FolderListScreen(
     groupName: String,
     folders: List<FolderClearInfo>,
     isLoading: Boolean,
+    loadingStatus: String = "",
     onViewFolder: (FolderClearInfo) -> Unit,
     onQuickDelete: (List<ManifestEntry>) -> Unit,
     onBack: () -> Unit,
@@ -123,7 +126,7 @@ private fun FolderListScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator()
                     Spacer(Modifier.height(16.dp))
-                    Text("Loading manifest...")
+                    Text(loadingStatus.ifEmpty { "Loading manifest..." })
                 }
             }
         } else if (folders.isEmpty() || folders.all { it.entries.isEmpty() }) {
