@@ -34,11 +34,12 @@ fun ProgressScreen(
         }
     }
 
-    // Read volatile fields (tick forces recomposition)
+    // Read volatile/atomic fields (tick forces recomposition)
     val isRunning = BackupService.isRunning.also { tick }
     val isDone = BackupService.isDone.also { tick }
     val groupName = BackupService.currentGroupName
     val currentFile = BackupService.currentFileName
+    val phase = BackupService.currentPhase
     val total = BackupService.totalFiles
     val completed = BackupService.completedFiles
     val skipped = BackupService.skippedFiles
@@ -80,54 +81,81 @@ fun ProgressScreen(
             Spacer(Modifier.height(8.dp))
 
             if (!isDone && isRunning) {
-                // Progress indicator
-                LinearProgressIndicator(
-                    progress = { percent / 100f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(12.dp),
-                )
+                // Phase 1: Scanning / Comparing (before copy starts)
+                if (phase == "scanning" || phase == "comparing") {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(12.dp),
+                    )
 
-                Text(
-                    "$percent%",
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
-
-                // Current file
-                if (currentFile.isNotEmpty()) {
+                    val phaseText = when (phase) {
+                        "scanning" -> "Scanning files..."
+                        "comparing" -> "Comparing with drive..."
+                        else -> "Preparing..."
+                    }
                     Text(
-                        currentFile,
+                        phaseText,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    Text(
+                        "This won't take long",
                         style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
+                } else {
+                    // Phase 2: Copying
+                    LinearProgressIndicator(
+                        progress = { percent / 100f },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(12.dp),
+                    )
 
-                // Stats
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        StatRow("Files", "$completed / $total")
-                        StatRow("Copied", "${formatBytes(copiedBytes)} / ${formatBytes(totalBytes)}")
-                        if (speed > 0) {
-                            StatRow("Speed", "${formatBytes(speed)}/s")
-                            val remaining = totalBytes - copiedBytes
-                            if (remaining > 0) {
-                                val etaMillis = remaining * 1000 / speed
-                                StatRow("Time remaining", "~${formatDuration(etaMillis)}")
+                    Text(
+                        "$percent%",
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    // Current file
+                    if (currentFile.isNotEmpty()) {
+                        Text(
+                            currentFile,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Stats
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            StatRow("Files", "$completed / $total")
+                            StatRow("Copied", "${formatBytes(copiedBytes)} / ${formatBytes(totalBytes)}")
+                            if (speed > 0) {
+                                StatRow("Speed", "${formatBytes(speed)}/s")
+                                val remaining = totalBytes - copiedBytes
+                                if (remaining > 0) {
+                                    val etaMillis = remaining * 1000 / speed
+                                    StatRow("Time remaining", "~${formatDuration(etaMillis)}")
+                                }
                             }
+                            if (startTime > 0) {
+                                val elapsed = System.currentTimeMillis() - startTime
+                                StatRow("Elapsed", formatDuration(elapsed))
+                            }
+                            if (skipped > 0) StatRow("Skipped (already on drive)", "$skipped")
+                            if (failed > 0) StatRow("Failed", "$failed")
                         }
-                        if (startTime > 0) {
-                            val elapsed = System.currentTimeMillis() - startTime
-                            StatRow("Elapsed", formatDuration(elapsed))
-                        }
-                        if (skipped > 0) StatRow("Skipped (already on drive)", "$skipped")
-                        if (failed > 0) StatRow("Failed", "$failed")
                     }
                 }
 

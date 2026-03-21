@@ -9,6 +9,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.ContentValues
+import android.database.Cursor
 import android.net.Uri
 import android.os.IBinder
 import android.provider.DocumentsContract
@@ -25,7 +26,10 @@ import com.sackup.data.LogEntry
 import com.sackup.data.ManifestEntry
 import com.sackup.util.formatBytes
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Represents a file discovered via MediaStore that needs to be backed up.
@@ -34,8 +38,25 @@ private data class MediaFileInfo(
     val uri: Uri,              // content:// URI to read from
     val name: String,          // display name e.g. "IMG_001.jpg"
     val size: Long,            // file size in bytes
-    val drivePath: String,     // relative path on drive e.g. "DCIM/Camera"
+    val drivePath: String,     // relative path on drive e.g. "DCIM_Camera"
     val dateModified: Long     // last modified timestamp in seconds (epoch)
+)
+
+/**
+ * A file that needs to be copied, with its destination directory URI pre-resolved.
+ */
+private data class CopyJob(
+    val source: MediaFileInfo,
+    val destDirUri: Uri        // document URI of the destination directory
+)
+
+/**
+ * Cached info about a file on the drive.
+ */
+private data class DriveFileInfo(
+    val name: String,
+    val size: Long,
+    val documentId: String
 )
 
 class BackupService : Service() {
@@ -47,32 +68,46 @@ class BackupService : Service() {
         const val ACTION_CANCEL = "com.sackup.CANCEL_BACKUP"
         const val EXTRA_GROUP_ID = "group_id"
         const val EXTRA_DRIVE_URI = "drive_uri"
+        const val EXTRA_SYNC_TIMESTAMP = "sync_timestamp"
 
-        // Buffer size: 1MB for maximum throughput
-        const val BUFFER_SIZE = 1024 * 1024
+        // Buffer size: 4MB for maximum throughput
+        const val BUFFER_SIZE = 4 * 1024 * 1024
 
-        // Shared state for UI to observe
+        // Number of parallel copy workers
+        const val COPY_WORKERS = 4
+
+        // Shared state for UI to observe (atomic for thread-safe parallel copy)
         @Volatile var isRunning = false
         @Volatile var currentGroupName = ""
         @Volatile var currentFileName = ""
+        @Volatile var currentPhase = ""   // "scanning", "comparing", "copying", "finishing"
         @Volatile var totalFiles = 0
-        @Volatile var completedFiles = 0
-        @Volatile var skippedFiles = 0
-        @Volatile var failedFiles = 0
         @Volatile var totalBytes = 0L
-        @Volatile var copiedBytes = 0L
-        @Volatile var progressPercent = 0
         @Volatile var isDone = false
         @Volatile var lastError = ""
         @Volatile var failedFilesList: List<String> = emptyList()
         @Volatile var startTimeMillis = 0L
-        @Volatile var bytesPerSecond = 0L     // rolling speed estimate
+        @Volatile var bytesPerSecond = 0L
 
-        fun start(context: Context, groupId: Long, driveUri: Uri) {
+        // Thread-safe counters for parallel copy
+        private val _completedFiles = AtomicInteger(0)
+        private val _skippedFiles = AtomicInteger(0)
+        private val _failedFiles = AtomicInteger(0)
+        private val _copiedBytes = AtomicLong(0L)
+        private val _progressPercent = AtomicInteger(0)
+
+        val completedFiles: Int get() = _completedFiles.get()
+        val skippedFiles: Int get() = _skippedFiles.get()
+        val failedFiles: Int get() = _failedFiles.get()
+        val copiedBytes: Long get() = _copiedBytes.get()
+        val progressPercent: Int get() = _progressPercent.get()
+
+        fun start(context: Context, groupId: Long, driveUri: Uri, syncTimestamp: Long) {
             val intent = Intent(context, BackupService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_GROUP_ID, groupId)
                 putExtra(EXTRA_DRIVE_URI, driveUri.toString())
+                putExtra(EXTRA_SYNC_TIMESTAMP, syncTimestamp)
             }
             context.startForegroundService(intent)
         }
@@ -88,13 +123,14 @@ class BackupService : Service() {
             isRunning = false
             currentGroupName = ""
             currentFileName = ""
+            currentPhase = ""
             totalFiles = 0
-            completedFiles = 0
-            skippedFiles = 0
-            failedFiles = 0
+            _completedFiles.set(0)
+            _skippedFiles.set(0)
+            _failedFiles.set(0)
             totalBytes = 0L
-            copiedBytes = 0L
-            progressPercent = 0
+            _copiedBytes.set(0L)
+            _progressPercent.set(0)
             isDone = false
             lastError = ""
             failedFilesList = emptyList()
@@ -124,6 +160,7 @@ class BackupService : Service() {
             ACTION_START -> {
                 val groupId = intent.getLongExtra(EXTRA_GROUP_ID, -1)
                 val driveUri = Uri.parse(intent.getStringExtra(EXTRA_DRIVE_URI))
+                val syncTimestamp = intent.getLongExtra(EXTRA_SYNC_TIMESTAMP, System.currentTimeMillis())
                 if (groupId == -1L) {
                     stopSelf()
                     return START_NOT_STICKY
@@ -134,7 +171,7 @@ class BackupService : Service() {
                 isDone = false
                 cancelled = false
                 sessionId = UUID.randomUUID().toString().take(8)
-                backupJob = scope.launch { runBackup(groupId, driveUri) }
+                backupJob = scope.launch { runBackup(groupId, driveUri, syncTimestamp) }
             }
             ACTION_CANCEL -> {
                 cancelled = true
@@ -149,7 +186,13 @@ class BackupService : Service() {
         super.onDestroy()
     }
 
-    private suspend fun runBackup(groupId: Long, driveUri: Uri) {
+    // ========================================================================================
+    // PHASE 1: Snapshot & Diff — scan phone + drive, build copy list, no drive writes
+    // PHASE 2: Parallel Copy — N workers consume from a channel
+    // PHASE 3: Post-copy — manifest rebuild, summary
+    // ========================================================================================
+
+    private suspend fun runBackup(groupId: Long, driveUri: Uri, syncTimestamp: Long) {
         val group = repo.getGroup(groupId)
         if (group == null) {
             log("ERROR", "", "Backup group not found")
@@ -167,7 +210,6 @@ class BackupService : Service() {
             return
         }
 
-        // Parse phone folders from JSON
         val phoneFolders: List<String> = try {
             Gson().fromJson(group.phoneFolders, object : TypeToken<List<String>>() {}.type)
         } catch (e: Exception) {
@@ -187,158 +229,332 @@ class BackupService : Service() {
 
         log("INFO", group.name, "Drive folder: ${group.driveFolder}")
 
-        // Collect all files via MediaStore
-        val filesToCopy = mutableListOf<MediaFileInfo>()
+        // ---- PHASE 1: Snapshot & Diff ----
+        currentPhase = "scanning"
+        updateNotification("Scanning phone files...")
 
+        // 1a. Query phone files with timestamp cutoff
+        val syncTimestampSecs = syncTimestamp / 1000
+        val phoneFiles = mutableListOf<MediaFileInfo>()
         for (folderPath in phoneFolders) {
             if (cancelled) break
             val topName = folderPath.replace("/", "_")
-            val files = queryMediaStoreFiles(folderPath, topName)
+            val files = queryMediaStoreFiles(folderPath, topName, syncTimestampSecs)
             log("INFO", group.name, "Found ${files.size} files in $folderPath")
-            filesToCopy.addAll(files)
+            phoneFiles.addAll(files)
         }
 
-        totalFiles = filesToCopy.size
-        totalBytes = filesToCopy.sumOf { it.size }
-        log("INFO", group.name, "Total: $totalFiles files, ${formatBytes(totalBytes)}")
+        if (cancelled) { finishBackup(group); return }
 
-        if (filesToCopy.isEmpty()) {
-            log("INFO", group.name, "Nothing to back up — all folders empty")
+        log("INFO", group.name, "Phone snapshot: ${phoneFiles.size} files (cutoff: files before sync tap only)")
+
+        // 1b. Scan drive using fast DocumentsContract cursors
+        currentPhase = "comparing"
+        updateNotification("Scanning drive files...")
+
+        // driveCache: drivePath → (fileName → DriveFileInfo)
+        val driveCache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
+        // dirDocIds: drivePath → documentId of that directory
+        val dirDocIds = mutableMapOf<String, String>()
+
+        val driveFolderDocId = DocumentsContract.getDocumentId(driveFolder.uri)
+        val treeUri = driveFolder.uri
+
+        for (folderPath in phoneFolders) {
+            if (cancelled) break
+            val subName = folderPath.replace("/", "_")
+            // Find the subfolder on drive
+            val subDirDocId = findChildDocumentId(treeUri, driveFolderDocId, subName)
+            if (subDirDocId != null) {
+                dirDocIds[subName] = subDirDocId
+                scanDriveFast(treeUri, subDirDocId, subName, driveCache, dirDocIds)
+            }
+        }
+
+        if (cancelled) { finishBackup(group); return }
+
+        val driveFileCount = driveCache.values.sumOf { it.size }
+        log("INFO", group.name, "Drive scan: $driveFileCount files indexed")
+
+        // 1c. Diff: determine what needs copying
+        val copyList = mutableListOf<CopyJob>()
+        var skipCount = 0
+        var copyBytes = 0L
+
+        for (file in phoneFiles) {
+            val existing = driveCache[file.drivePath]
+            if (existing != null && existing[file.name]?.size == file.size) {
+                skipCount++
+                continue
+            }
+            // We'll resolve the dest dir URI later after pre-creating dirs
+            copyList.add(CopyJob(source = file, destDirUri = Uri.EMPTY))
+        }
+
+        // Set totals now — totalFiles includes skipped for progress tracking
+        totalFiles = phoneFiles.size
+        totalBytes = phoneFiles.sumOf { it.size }
+        _skippedFiles.set(skipCount)
+        _completedFiles.set(skipCount) // skipped are already "done"
+        updateProgress()
+
+        log("INFO", group.name, "Diff: ${copyList.size} to copy, $skipCount already on drive, total ${formatBytes(totalBytes)}")
+
+        if (copyList.isEmpty()) {
+            log("INFO", group.name, "Everything is already backed up!")
             finishBackup(group)
             return
         }
 
-        // Scan existing files on drive to skip already-backed-up files
-        val existingFiles = mutableMapOf<String, MutableMap<String, Long>>()
-        fun scanDriveDir(docDir: DocumentFile, path: String) {
-            for (f in docDir.listFiles()) {
-                if (f.isDirectory) {
-                    scanDriveDir(f, "$path/${f.name ?: ""}")
-                } else if (f.isFile) {
-                    existingFiles.getOrPut(path) { mutableMapOf() }[f.name ?: ""] = f.length()
-                }
-            }
-        }
-        for (folderPath in phoneFolders) {
+        // 1d. Pre-create all destination directories
+        val uniquePaths = copyList.map { it.source.drivePath }.toSet()
+        val resolvedDirUris = mutableMapOf<String, Uri>()
+
+        for (path in uniquePaths) {
             if (cancelled) break
-            val subName = folderPath.replace("/", "_")
-            val subDir = driveFolder.findFile(subName)
-            if (subDir != null && subDir.isDirectory) {
-                scanDriveDir(subDir, subName)
+            val dirUri = getOrCreateDirFast(treeUri, driveFolderDocId, path, dirDocIds)
+            if (dirUri != null) {
+                resolvedDirUris[path] = dirUri
+            } else {
+                log("ERROR", group.name, "Could not create directory '$path' on drive")
             }
         }
 
-        val errors = mutableListOf<String>()
-        var copiedCount = 0
-        var copiedSize = 0L
+        if (cancelled) { finishBackup(group); return }
+
+        // Resolve dest URIs in copy jobs
+        val resolvedCopyList = copyList.mapNotNull { job ->
+            val dirUri = resolvedDirUris[job.source.drivePath]
+            if (dirUri != null) {
+                job.copy(destDirUri = dirUri)
+            } else {
+                _failedFiles.incrementAndGet()
+                _completedFiles.incrementAndGet()
+                updateProgress()
+                null
+            }
+        }
+
+        // ---- PHASE 2: Parallel Copy ----
+        currentPhase = "copying"
         val startTime = System.currentTimeMillis()
         startTimeMillis = startTime
 
-        for (fileInfo in filesToCopy) {
-            if (cancelled) {
-                log("INFO", group.name, "Backup cancelled by user")
-                break
+        log("INFO", group.name, "Starting parallel copy with $COPY_WORKERS workers...")
+
+        val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var copiedCount = AtomicInteger(0)
+        var copiedSize = AtomicLong(0)
+
+        val channel = Channel<CopyJob>(capacity = Channel.UNLIMITED)
+
+        // Feed all jobs into the channel
+        for (job in resolvedCopyList) {
+            channel.send(job)
+        }
+        channel.close()
+
+        // Launch workers
+        val workers = (1..COPY_WORKERS).map { workerNum ->
+            scope.launch {
+                for (job in channel) {
+                    if (cancelled) break
+
+                    currentFileName = job.source.name
+
+                    try {
+                        copyFileFast(job.source, job.destDirUri)
+                        copiedCount.incrementAndGet()
+                        copiedSize.addAndGet(job.source.size)
+                        _copiedBytes.addAndGet(job.source.size)
+                    } catch (e: Exception) {
+                        val msg = e.message ?: "Unknown error"
+                        log("ERROR", group.name, "Failed to copy ${job.source.name}: $msg")
+                        errors.add("${job.source.name}: $msg")
+                        _failedFiles.incrementAndGet()
+                    }
+
+                    _completedFiles.incrementAndGet()
+                    updateProgress()
+
+                    // Update speed estimate
+                    val elapsed = System.currentTimeMillis() - startTime
+                    if (elapsed > 0) {
+                        bytesPerSecond = _copiedBytes.get() * 1000 / elapsed
+                    }
+
+                    updateNotification("Copying: ${job.source.name} (${completedFiles}/$totalFiles)")
+                }
             }
+        }
 
-            currentFileName = fileInfo.name
+        // Wait for all workers to finish
+        workers.forEach { it.join() }
 
-            // Check if already exists on drive (same name and size = skip)
-            val existing = existingFiles[fileInfo.drivePath]
-            if (existing != null && existing[fileInfo.name] == fileInfo.size) {
-                skippedFiles++
-                completedFiles++
-                updateProgress()
-                continue
-            }
-
-            // Get or create subfolder path on drive
-            val subDir = getOrCreatePath(driveFolder, fileInfo.drivePath)
-            if (subDir == null) {
-                val msg = "Could not create subfolder '${fileInfo.drivePath}' on drive"
-                log("ERROR", group.name, msg)
-                errors.add("${fileInfo.name}: $msg")
-                failedFiles++
-                completedFiles++
-                updateProgress()
-                continue
-            }
-
-            // Copy the file
-            try {
-                copyFile(fileInfo, subDir)
-                copiedCount++
-                copiedSize += fileInfo.size
-                copiedBytes += fileInfo.size
-            } catch (e: Exception) {
-                val msg = e.message ?: "Unknown error"
-                log("ERROR", group.name, "Failed to copy ${fileInfo.name}: $msg")
-                errors.add("${fileInfo.name}: $msg")
-                failedFiles++
-                // Try to clean up partial file
-                try {
-                    subDir.findFile(fileInfo.name)?.delete()
-                } catch (_: Exception) {}
-            }
-
-            completedFiles++
-            updateProgress()
-
-            // Update speed estimate
-            val elapsed = System.currentTimeMillis() - startTime
-            if (elapsed > 0 && copiedBytes > 0) {
-                bytesPerSecond = copiedBytes * 1000 / elapsed
-            }
-
-            updateNotification("Copying: ${fileInfo.name} ($completedFiles/$totalFiles)")
+        if (cancelled) {
+            log("INFO", group.name, "Backup cancelled by user")
         }
 
         val elapsed = System.currentTimeMillis() - startTime
 
-        // Summary
+        // ---- PHASE 3: Post-copy ----
+        currentPhase = "finishing"
+
         val summary = buildString {
             append("${group.name} backup ")
             if (cancelled) append("cancelled. ") else append("complete. ")
-            append("$copiedCount files copied (${formatBytes(copiedSize)})")
-            if (skippedFiles > 0) append(", $skippedFiles already on drive")
+            append("${copiedCount.get()} files copied (${formatBytes(copiedSize.get())})")
+            if (skipCount > 0) append(", $skipCount already on drive")
             if (failedFiles > 0) append(", $failedFiles failed")
             append(".")
         }
         log("INFO", group.name, summary)
 
-        failedFilesList = errors
+        failedFilesList = errors.toList()
 
-        // Update group stats
         repo.updateGroup(
             group.copy(
                 lastBackupTime = System.currentTimeMillis(),
-                lastBackupFileCount = copiedCount,
-                lastBackupBytes = copiedSize
+                lastBackupFileCount = copiedCount.get(),
+                lastBackupBytes = copiedSize.get()
             )
         )
 
-        // Rebuild manifest: fresh scan of drive, cross-reference with phone files
+        // Rebuild manifest using cached data + newly copied files
         if (!cancelled) {
             updateNotification("Building manifest...")
             log("INFO", group.name, "Rebuilding manifest...")
             val backupSuccess = failedFiles == 0
-            rebuildManifest(group, phoneFolders, driveFolder, backupSuccess)
+            rebuildManifest(group, phoneFolders, treeUri, driveFolderDocId, backupSuccess)
             log("INFO", group.name, "Manifest updated")
         }
 
         finishBackup(group)
     }
 
+    // ========================================================================================
+    // Fast drive scanning using DocumentsContract (no DocumentFile overhead)
+    // ========================================================================================
+
     /**
-     * Query MediaStore for all files whose RELATIVE_PATH starts with the given folder.
-     * e.g. folderPath="DCIM" matches RELATIVE_PATH "DCIM/", "DCIM/Camera/", etc.
-     * Returns MediaFileInfo with drive paths like "DCIM/Camera" (topName replaces / with _
-     * at the top level, subfolders preserved).
+     * Find a child document by name within a parent directory. Returns documentId or null.
      */
-    private fun queryMediaStoreFiles(folderPath: String, topName: String): List<MediaFileInfo> {
+    private fun findChildDocumentId(treeUri: Uri, parentDocId: String, childName: String): String? {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        )
+        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameCol) == childName) {
+                    return cursor.getString(idCol)
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Recursively scan a drive directory using DocumentsContract cursors.
+     * Much faster than DocumentFile.listFiles() — no per-file object allocation.
+     */
+    private fun scanDriveFast(
+        treeUri: Uri,
+        dirDocId: String,
+        dirPath: String,
+        cache: MutableMap<String, MutableMap<String, DriveFileInfo>>,
+        dirDocIds: MutableMap<String, String>
+    ) {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_MIME_TYPE
+        )
+
+        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+            val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+
+            while (cursor.moveToNext()) {
+                val docId = cursor.getString(idCol) ?: continue
+                val name = cursor.getString(nameCol) ?: continue
+                val mime = cursor.getString(mimeCol) ?: ""
+                val size = if (cursor.isNull(sizeCol)) 0L else cursor.getLong(sizeCol)
+
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    val subPath = "$dirPath/$name"
+                    dirDocIds[subPath] = docId
+                    scanDriveFast(treeUri, docId, subPath, cache, dirDocIds)
+                } else {
+                    cache.getOrPut(dirPath) { mutableMapOf() }[name] = DriveFileInfo(name, size, docId)
+                }
+            }
+        }
+    }
+
+    /**
+     * Get or create a directory path on the drive, using cached documentIds where possible.
+     * Returns the document URI of the final directory.
+     */
+    private fun getOrCreateDirFast(
+        treeUri: Uri,
+        rootDocId: String,
+        path: String,
+        dirDocIds: MutableMap<String, String>
+    ): Uri? {
+        val segments = path.split("/").filter { it.isNotBlank() }
+        var currentDocId = rootDocId
+        var currentPath = ""
+
+        for (segment in segments) {
+            currentPath = if (currentPath.isEmpty()) segment else "$currentPath/$segment"
+
+            val cached = dirDocIds[currentPath]
+            if (cached != null) {
+                currentDocId = cached
+                continue
+            }
+
+            // Try to find existing child
+            val existingId = findChildDocumentId(treeUri, currentDocId, segment)
+            if (existingId != null) {
+                dirDocIds[currentPath] = existingId
+                currentDocId = existingId
+                continue
+            }
+
+            // Create the directory
+            val parentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, currentDocId)
+            val newUri = DocumentsContract.createDocument(
+                contentResolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, segment
+            ) ?: return null
+            val newDocId = DocumentsContract.getDocumentId(newUri)
+            dirDocIds[currentPath] = newDocId
+            currentDocId = newDocId
+        }
+
+        return DocumentsContract.buildDocumentUriUsingTree(treeUri, currentDocId)
+    }
+
+    // ========================================================================================
+    // MediaStore queries (with timestamp filter)
+    // ========================================================================================
+
+    /**
+     * Query MediaStore for files modified before the sync timestamp.
+     * Files created after the user tapped Sync are excluded.
+     */
+    private fun queryMediaStoreFiles(folderPath: String, topName: String, beforeTimestampSecs: Long): List<MediaFileInfo> {
         val results = mutableListOf<MediaFileInfo>()
         val resolver = contentResolver
-
-        // Query MediaStore.Files which covers all file types
         val collection = MediaStore.Files.getContentUri("external")
 
         val projection = arrayOf(
@@ -349,10 +565,9 @@ class BackupService : Service() {
             MediaStore.Files.FileColumns.DATE_MODIFIED
         )
 
-        // RELATIVE_PATH looks like "DCIM/Camera/" — match anything starting with our folder
-        // Use trailing / to avoid matching e.g. "DCIM2" when looking for "DCIM"
-        val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
-        val selectionArgs = arrayOf("$folderPath/%")
+        // Subfolder files: RELATIVE_PATH LIKE "folderPath/%"
+        val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.Files.FileColumns.SIZE} > 0 AND ${MediaStore.Files.FileColumns.DATE_MODIFIED} <= ?"
+        val selectionArgs = arrayOf("$folderPath/%", beforeTimestampSecs.toString())
 
         resolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
@@ -369,25 +584,16 @@ class BackupService : Service() {
                 val dateModified = cursor.getLong(dateCol)
 
                 val contentUri = ContentUris.withAppendedId(collection, id)
-
-                // relativePath is e.g. "DCIM/Camera/" — strip the top folder and trailing /
-                // to get the sub-path, then prepend topName
                 val subPath = relativePath.removePrefix("$folderPath/").trimEnd('/')
                 val drivePath = if (subPath.isEmpty()) topName else "$topName/$subPath"
 
-                results.add(MediaFileInfo(
-                    uri = contentUri,
-                    name = name,
-                    size = size,
-                    drivePath = drivePath,
-                    dateModified = dateModified
-                ))
+                results.add(MediaFileInfo(contentUri, name, size, drivePath, dateModified))
             }
         }
 
-        // Also match files directly in the folder (RELATIVE_PATH = "DCIM/" exactly)
-        val directSelection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
-        val directArgs = arrayOf("$folderPath/")
+        // Direct files: RELATIVE_PATH = "folderPath/"
+        val directSelection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0 AND ${MediaStore.Files.FileColumns.DATE_MODIFIED} <= ?"
+        val directArgs = arrayOf("$folderPath/", beforeTimestampSecs.toString())
 
         resolver.query(collection, projection, directSelection, directArgs, null)?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
@@ -402,71 +608,144 @@ class BackupService : Service() {
                 val dateModified = cursor.getLong(dateCol)
 
                 val contentUri = ContentUris.withAppendedId(collection, id)
-
-                results.add(MediaFileInfo(
-                    uri = contentUri,
-                    name = name,
-                    size = size,
-                    drivePath = topName,
-                    dateModified = dateModified
-                ))
+                results.add(MediaFileInfo(contentUri, name, size, topName, dateModified))
             }
         }
 
         return results
     }
 
-    /**
-     * Rebuild the manifest by scanning the drive and matching against phone files.
-     * For each file on the drive, if a matching phone file exists (same name + size),
-     * create a manifest entry.
-     */
+    // ========================================================================================
+    // Fast file copy using DocumentsContract (no findFile/createFile overhead)
+    // ========================================================================================
+
+    private fun copyFileFast(source: MediaFileInfo, destDirUri: Uri) {
+        val mimeType = when {
+            source.name.endsWith(".jpg", true) || source.name.endsWith(".jpeg", true) -> "image/jpeg"
+            source.name.endsWith(".png", true) -> "image/png"
+            source.name.endsWith(".gif", true) -> "image/gif"
+            source.name.endsWith(".webp", true) -> "image/webp"
+            source.name.endsWith(".mp4", true) -> "video/mp4"
+            source.name.endsWith(".3gp", true) -> "video/3gpp"
+            source.name.endsWith(".mkv", true) -> "video/x-matroska"
+            source.name.endsWith(".mov", true) -> "video/quicktime"
+            source.name.endsWith(".mp3", true) -> "audio/mpeg"
+            source.name.endsWith(".m4a", true) -> "audio/mp4"
+            source.name.endsWith(".pdf", true) -> "application/pdf"
+            source.name.endsWith(".heic", true) -> "image/heic"
+            source.name.endsWith(".heif", true) -> "image/heif"
+            source.name.endsWith(".webm", true) -> "video/webm"
+            source.name.endsWith(".avi", true) -> "video/x-msvideo"
+            else -> "application/octet-stream"
+        }
+
+        val resolver = contentResolver
+
+        // Delete existing partial file if present (size mismatch from previous attempt)
+        val destDirDocId = DocumentsContract.getDocumentId(destDirUri)
+        val existingDocId = findChildDocumentId(destDirUri, destDirDocId, source.name)
+        if (existingDocId != null) {
+            try {
+                val existingUri = DocumentsContract.buildDocumentUriUsingTree(destDirUri, existingDocId)
+                DocumentsContract.deleteDocument(resolver, existingUri)
+            } catch (_: Exception) {}
+        }
+
+        // Create the file directly
+        val destFileUri = DocumentsContract.createDocument(resolver, destDirUri, mimeType, source.name)
+            ?: throw Exception("Could not create file on drive")
+
+        val outputStream = resolver.openOutputStream(destFileUri)
+            ?: throw Exception("Could not open output stream")
+        val inputStream = resolver.openInputStream(source.uri)
+            ?: throw Exception("Could not read source file")
+
+        var bytesWritten = 0L
+        try {
+            outputStream.use { out ->
+                inputStream.use { input ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        if (cancelled) {
+                            throw Exception("Cancelled")
+                        }
+                        out.write(buffer, 0, bytesRead)
+                        bytesWritten += bytesRead
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Clean up partial file
+            try { DocumentsContract.deleteDocument(resolver, destFileUri) } catch (_: Exception) {}
+            throw e
+        }
+
+        // Verify file size
+        if (bytesWritten != source.size) {
+            try { DocumentsContract.deleteDocument(resolver, destFileUri) } catch (_: Exception) {}
+            throw Exception("Size mismatch after copy: expected ${formatBytes(source.size)}, got ${formatBytes(bytesWritten)}")
+        }
+
+        // Preserve original modification timestamp
+        if (source.dateModified > 0) {
+            try {
+                val values = ContentValues().apply {
+                    put(DocumentsContract.Document.COLUMN_LAST_MODIFIED, source.dateModified * 1000)
+                }
+                resolver.update(destFileUri, values, null, null)
+            } catch (_: Exception) {
+                // Not all document providers support setting timestamps — ignore
+            }
+        }
+    }
+
+    // ========================================================================================
+    // Manifest rebuild (using fast DocumentsContract scan)
+    // ========================================================================================
+
     private suspend fun rebuildManifest(
         group: BackupGroup,
         phoneFolders: List<String>,
-        driveFolder: DocumentFile,
+        treeUri: Uri,
+        driveFolderDocId: String,
         backupSuccess: Boolean
     ) {
-        // Scan drive to get all files with their paths
-        val driveFiles = mutableListOf<Triple<String, String, Long>>() // drivePath, fileName, fileSize
-        fun scanDrive(docDir: DocumentFile, path: String) {
-            for (f in docDir.listFiles()) {
-                if (f.isDirectory) {
-                    scanDrive(f, "$path/${f.name ?: ""}")
-                } else if (f.isFile) {
-                    driveFiles.add(Triple(path, f.name ?: "", f.length()))
+        // Scan drive using fast cursors
+        val driveFiles = mutableListOf<Triple<String, String, Long>>()
+        val dirDocIds = mutableMapOf<String, String>()
+
+        for (folderPath in phoneFolders) {
+            val subName = folderPath.replace("/", "_")
+            val subDocId = findChildDocumentId(treeUri, driveFolderDocId, subName) ?: continue
+            dirDocIds[subName] = subDocId
+
+            // Collect files
+            val cache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
+            scanDriveFast(treeUri, subDocId, subName, cache, dirDocIds)
+            for ((path, files) in cache) {
+                for ((name, info) in files) {
+                    driveFiles.add(Triple(path, name, info.size))
                 }
             }
         }
-        for (folderPath in phoneFolders) {
-            val subName = folderPath.replace("/", "_")
-            val subDir = driveFolder.findFile(subName) ?: continue
-            if (subDir.isDirectory) {
-                scanDrive(subDir, subName)
-            }
-        }
 
-        // Build a lookup of phone files: (phoneFolder, name, size) → (phonePath, dateModified)
-        val phoneFiles = mutableMapOf<String, Pair<String, Long>>() // "folder|name|size" → (phonePath, dateModified)
+        // Build phone file lookup (no timestamp filter for manifest — include everything)
+        val phoneFiles = mutableMapOf<String, Pair<String, Long>>()
         for (folderPath in phoneFolders) {
             val topName = folderPath.replace("/", "_")
-            val files = queryMediaStoreFiles(folderPath, topName)
+            val files = queryMediaStoreFiles(folderPath, topName, Long.MAX_VALUE)
             for (f in files) {
-                phoneFiles["${f.drivePath}|${f.name}|${f.size}"] = Pair(
-                    folderPath,
-                    f.dateModified
-                )
+                phoneFiles["${f.drivePath}|${f.name}|${f.size}"] = Pair(folderPath, f.dateModified)
             }
         }
 
-        // Cross-reference: for each drive file, find matching phone file
         val entries = mutableListOf<ManifestEntry>()
         for ((drivePath, fileName, fileSize) in driveFiles) {
             val key = "$drivePath|$fileName|$fileSize"
             val phoneInfo = phoneFiles[key]
             if (phoneInfo != null) {
                 val (phoneFolder, dateModified) = phoneInfo
-                // Derive phonePath from drivePath: "DCIM/Camera" → "DCIM/Camera/"
                 val topName = phoneFolder.replace("/", "_")
                 val subPath = drivePath.removePrefix(topName).trimStart('/')
                 val phonePath = if (subPath.isEmpty()) "$phoneFolder/" else "$phoneFolder/$subPath/"
@@ -487,80 +766,12 @@ class BackupService : Service() {
         repo.rebuildManifest(group.id, entries)
     }
 
-    private fun getOrCreatePath(root: DocumentFile, path: String): DocumentFile? {
-        var current = root
-        for (segment in path.split("/")) {
-            if (segment.isBlank()) continue
-            current = current.findFile(segment) ?: current.createDirectory(segment) ?: return null
-        }
-        return current
-    }
-
-    private fun copyFile(source: MediaFileInfo, destDir: DocumentFile) {
-        // Determine MIME type from file name
-        val mimeType = when {
-            source.name.endsWith(".jpg", true) || source.name.endsWith(".jpeg", true) -> "image/jpeg"
-            source.name.endsWith(".png", true) -> "image/png"
-            source.name.endsWith(".gif", true) -> "image/gif"
-            source.name.endsWith(".webp", true) -> "image/webp"
-            source.name.endsWith(".mp4", true) -> "video/mp4"
-            source.name.endsWith(".3gp", true) -> "video/3gpp"
-            source.name.endsWith(".mkv", true) -> "video/x-matroska"
-            source.name.endsWith(".mov", true) -> "video/quicktime"
-            source.name.endsWith(".mp3", true) -> "audio/mpeg"
-            source.name.endsWith(".m4a", true) -> "audio/mp4"
-            source.name.endsWith(".pdf", true) -> "application/pdf"
-            else -> "application/octet-stream"
-        }
-
-        // Delete existing file if present (might be partial from previous failed attempt)
-        destDir.findFile(source.name)?.delete()
-
-        val destFile = destDir.createFile(mimeType, source.name)
-            ?: throw Exception("Could not create file on drive")
-
-        val resolver = contentResolver
-        val outputStream = resolver.openOutputStream(destFile.uri)
-            ?: throw Exception("Could not open output stream")
-        val inputStream = resolver.openInputStream(source.uri)
-            ?: throw Exception("Could not read source file")
-
-        outputStream.use { out ->
-            inputStream.use { input ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    if (cancelled) {
-                        destFile.delete()
-                        throw Exception("Cancelled")
-                    }
-                    out.write(buffer, 0, bytesRead)
-                }
-            }
-        }
-
-        // Verify file size
-        val destSize = destFile.length()
-        if (destSize != source.size) {
-            destFile.delete()
-            throw Exception("Size mismatch after copy: expected ${formatBytes(source.size)}, got ${formatBytes(destSize)}")
-        }
-
-        // Preserve original modification timestamp
-        if (source.dateModified > 0) {
-            try {
-                val values = ContentValues().apply {
-                    put(DocumentsContract.Document.COLUMN_LAST_MODIFIED, source.dateModified * 1000)
-                }
-                resolver.update(destFile.uri, values, null, null)
-            } catch (_: Exception) {
-                // Not all document providers support setting timestamps — ignore
-            }
-        }
-    }
+    // ========================================================================================
+    // Progress, logging, notifications
+    // ========================================================================================
 
     private fun updateProgress() {
-        progressPercent = if (totalFiles > 0) (completedFiles * 100 / totalFiles) else 0
+        _progressPercent.set(if (totalFiles > 0) (completedFiles * 100 / totalFiles) else 0)
     }
 
     private suspend fun log(level: String, groupName: String, message: String) {
@@ -578,6 +789,7 @@ class BackupService : Service() {
         isDone = true
         isRunning = false
         currentFileName = ""
+        currentPhase = ""
 
         val summary = if (cancelled) {
             "Backup cancelled"
