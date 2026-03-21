@@ -64,7 +64,8 @@ data class CopyResult(
     val copiedCount: Int,
     val copiedSize: Long,
     val failedCount: Int,
-    val failedFiles: List<String>
+    val failedFiles: List<String>,
+    val copiedFileKeys: Set<String> = emptySet()  // "drivePath|name" of successfully copied files
 )
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -159,11 +160,10 @@ class BackupEngine(private val resolver: ContentResolver) {
                     onDrive++; onDriveSize += pf.size
                 } else {
                     if (driveInfo != null && driveInfo.size != pf.size) {
-                        // Partial file on drive — rename with __ prefix instead of deleting
-                        // Repeated partials accumulate prefixes: __IMG.jpg → ____IMG.jpg
+                        // Partial file on drive — delete it so the full copy can replace it
                         try {
                             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, driveInfo.documentId)
-                            DocumentsContract.renameDocument(resolver, docUri, "__${pf.name}")
+                            DocumentsContract.deleteDocument(resolver, docUri)
                             driveFileCache[pf.drivePath]?.remove(pf.name)
                         } catch (_: Exception) {}
                     }
@@ -329,6 +329,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         val copiedBytes = AtomicLong(0)
         val failedCount = AtomicInteger(0)
         val errors = ConcurrentLinkedQueue<String>()
+        val successKeys = ConcurrentLinkedQueue<String>()
         val startTime = System.currentTimeMillis()
 
         // Rolling speed: track bytes at a timestamp 5 seconds ago
@@ -347,6 +348,7 @@ class BackupEngine(private val resolver: ContentResolver) {
                         try {
                             copyOneFile(job, treeUri, isCancelled)
                             copiedBytes.addAndGet(job.phone.size)
+                            successKeys.add("${job.phone.drivePath}|${job.phone.name}")
                         } catch (_: CancelledException) {
                             break
                         } catch (e: CancellationException) {
@@ -381,7 +383,8 @@ class BackupEngine(private val resolver: ContentResolver) {
             copiedCount = completedCount.get() - failedCount.get(),
             copiedSize = copiedBytes.get(),
             failedCount = failedCount.get(),
-            failedFiles = errors.toList()
+            failedFiles = errors.toList(),
+            copiedFileKeys = successKeys.toSet()
         )
     }
 
