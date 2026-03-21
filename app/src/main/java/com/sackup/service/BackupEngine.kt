@@ -73,7 +73,8 @@ data class CopyResult(
 class BackupEngine(private val resolver: ContentResolver) {
 
     companion object {
-        const val BUFFER_SIZE = 4 * 1024 * 1024  // 4MB
+        const val BUFFER_SIZE = 4 * 1024 * 1024  // 4MB read buffer
+        const val WRITE_CHUNK = 256 * 1024        // 256KB write chunks for responsive cancel
         const val WORKER_COUNT = 2  // USB is serial — more workers = more SAF overhead, not more throughput
     }
 
@@ -620,6 +621,8 @@ class BackupEngine(private val resolver: ContentResolver) {
         val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, job.destParentDocId)
         val mimeType = getMimeType(job.phone.name)
 
+        if (isCancelled()) throw CancelledException()
+
         val destUri = DocumentsContract.createDocument(resolver, parentDocUri, mimeType, job.phone.name)
             ?: throw Exception("Could not create file on drive")
 
@@ -634,13 +637,21 @@ class BackupEngine(private val resolver: ContentResolver) {
                     val buffer = ByteArray(BUFFER_SIZE)
                     var bytesRead: Int
                     while (inp.read(buffer).also { bytesRead = it } != -1) {
-                        if (isCancelled()) {
-                            try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
-                            throw CancelledException()
+                        // Write in small chunks so cancel checks are responsive
+                        var written = 0
+                        while (written < bytesRead) {
+                            if (isCancelled()) {
+                                try { inp.close() } catch (_: Exception) {}
+                                try { out.close() } catch (_: Exception) {}
+                                try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
+                                throw CancelledException()
+                            }
+                            val chunk = minOf(WRITE_CHUNK, bytesRead - written)
+                            out.write(buffer, written, chunk)
+                            written += chunk
                         }
-                        out.write(buffer, 0, bytesRead)
                     }
-                    out.flush()  // force data to USB, prevents OS cache burst illusion
+                    out.flush()
                 }
             }
         } catch (e: CancelledException) {
