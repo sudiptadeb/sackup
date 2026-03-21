@@ -33,6 +33,7 @@ data class AnalyzeSummary(
 fun AnalyzeScreen(
     summary: AnalyzeSummary?,
     isLoading: Boolean,
+    scanStatus: String = "",
     onSyncNow: () -> Unit,
     onExport: () -> Unit,
     onBack: () -> Unit,
@@ -64,7 +65,7 @@ fun AnalyzeScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator()
                     Spacer(Modifier.height(16.dp))
-                    Text("Scanning phone and drive...")
+                    Text(if (scanStatus.isNotEmpty()) scanStatus else "Scanning...")
                 }
             }
         } else if (summary == null) {
