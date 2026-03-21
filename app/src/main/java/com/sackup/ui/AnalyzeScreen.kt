@@ -25,7 +25,8 @@ data class AnalyzeSummary(
     val folders: List<FolderDiff>,
     val driveConnected: Boolean,
     val totalToCopy: Int,
-    val totalToCopySize: Long
+    val totalToCopySize: Long,
+    val scanDurationSeconds: Long = 0
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -34,6 +35,7 @@ fun AnalyzeScreen(
     summary: AnalyzeSummary?,
     isLoading: Boolean,
     scanStatus: String = "",
+    scanElapsedSeconds: Long = 0,
     onSyncNow: () -> Unit,
     onExport: () -> Unit,
     onBack: () -> Unit,
@@ -66,6 +68,12 @@ fun AnalyzeScreen(
                     CircularProgressIndicator()
                     Spacer(Modifier.height(16.dp))
                     Text(if (scanStatus.isNotEmpty()) scanStatus else "Scanning...")
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        formatDuration(scanElapsedSeconds),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         } else if (summary == null) {
@@ -106,6 +114,15 @@ fun AnalyzeScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Spacer(Modifier.height(8.dp))
+
+                            if (summary.scanDurationSeconds > 0) {
+                                Text(
+                                    "Scanned in ${formatDuration(summary.scanDurationSeconds)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(8.dp))
+                            }
 
                             if (!summary.driveConnected) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -285,4 +302,10 @@ fun AnalyzeFolderCard(result: FolderDiff) {
             }
         }
     }
+}
+
+private fun formatDuration(seconds: Long): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return if (m > 0) "${m}m ${s}s" else "${s}s"
 }

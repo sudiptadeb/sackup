@@ -313,6 +313,16 @@ class MainActivity : ComponentActivity() {
                         var analyzeSummary by remember { mutableStateOf<AnalyzeSummary?>(null) }
                         var isLoading by remember { mutableStateOf(true) }
                         var scanStatus by remember { mutableStateOf("") }
+                        var scanElapsedSeconds by remember { mutableLongStateOf(0L) }
+                        val scanStartTime = remember { System.currentTimeMillis() }
+
+                        // Tick elapsed time every second while scanning
+                        LaunchedEffect(isLoading) {
+                            while (isLoading) {
+                                scanElapsedSeconds = (System.currentTimeMillis() - scanStartTime) / 1000
+                                kotlinx.coroutines.delay(1000)
+                            }
+                        }
 
                         LaunchedEffect(groupId) {
                             val group = repo.getGroup(groupId)
@@ -333,12 +343,14 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
                                     }
+                                    val scanDuration = (System.currentTimeMillis() - scanStartTime) / 1000
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
                                         folders = snapshot.perFolder,
                                         driveConnected = true,
                                         totalToCopy = snapshot.filesToCopy.size,
-                                        totalToCopySize = snapshot.totalBytesToCopy
+                                        totalToCopySize = snapshot.totalBytesToCopy,
+                                        scanDurationSeconds = scanDuration
                                     )
                                 } else {
                                     // Drive not connected — use manifest for offline analysis
@@ -347,12 +359,14 @@ class MainActivity : ComponentActivity() {
                                     val snapshot = withContext(Dispatchers.IO) {
                                         engine.snapshotFromManifest(phoneFolders, manifestEntries)
                                     }
+                                    val scanDuration = (System.currentTimeMillis() - scanStartTime) / 1000
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
                                         folders = snapshot.perFolder,
                                         driveConnected = false,
                                         totalToCopy = snapshot.filesToCopy.size,
-                                        totalToCopySize = snapshot.totalBytesToCopy
+                                        totalToCopySize = snapshot.totalBytesToCopy,
+                                        scanDurationSeconds = scanDuration
                                     )
                                 }
                             }
@@ -363,6 +377,7 @@ class MainActivity : ComponentActivity() {
                             summary = analyzeSummary,
                             isLoading = isLoading,
                             scanStatus = scanStatus,
+                            scanElapsedSeconds = scanElapsedSeconds,
                             onSyncNow = {
                                 val uri = driveUri
                                 if (uri != null) {
