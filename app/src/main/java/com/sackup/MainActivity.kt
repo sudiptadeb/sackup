@@ -118,7 +118,7 @@ class MainActivity : ComponentActivity() {
                                     Toast.makeText(this@MainActivity, "Please select a USB drive first", Toast.LENGTH_SHORT).show()
                                     return@HomeScreen
                                 }
-                                BackupService.start(this@MainActivity, group.id, uri)
+                                BackupService.start(this@MainActivity, group.id, uri, System.currentTimeMillis())
                                 navController.navigate(Routes.PROGRESS)
                             },
                             onEditGroup = { group ->
