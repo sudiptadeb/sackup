@@ -456,10 +456,12 @@ class BackupEngine(private val resolver: ContentResolver) {
                 val mime = cursor.getString(mimeCol) ?: ""
 
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    if (name.startsWith(".")) continue  // skip hidden dirs (.thumbnails, .trashed, etc.)
                     val childPath = "$parentPath/$name"
                     dirs[childPath] = docId
                     scanDriveCursor(treeUri, docId, childPath, files, dirs, onFileCount)
                 } else {
+                    if (name.startsWith(".")) continue  // skip hidden files (.nomedia, .DS_Store, etc.)
                     val size = cursor.getLong(sizeCol)
                     files.getOrPut(parentPath) { mutableMapOf() }[name] = DriveFileInfo(size, docId)
                     scanFileCount++
