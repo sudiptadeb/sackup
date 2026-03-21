@@ -198,6 +198,94 @@ class BackupEngine(private val resolver: ContentResolver) {
         )
     }
 
+    /**
+     * Fast snapshot using manifest instead of drive scan.
+     * Phone files from MediaStore, drive state from manifest (Room SQLite).
+     * No USB I/O at all — completes in milliseconds.
+     */
+    fun snapshotFromManifest(
+        phoneFolders: List<String>,
+        manifestEntries: List<ManifestEntry>,
+        syncTimestamp: Long = Long.MAX_VALUE
+    ): SnapshotResult {
+        // Build drive file cache from manifest
+        val driveFileCache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
+        for (entry in manifestEntries) {
+            driveFileCache.getOrPut(entry.drivePath) { mutableMapOf() }[entry.fileName] =
+                DriveFileInfo(entry.fileSize, "")  // no docId needed for manifest-based diff
+        }
+
+        // Query phone files
+        val allPhoneFiles = mutableListOf<PhoneFile>()
+        for (folderPath in phoneFolders) {
+            allPhoneFiles.addAll(queryPhoneFiles(folderPath, folderPath, syncTimestamp))
+        }
+
+        // Diff per folder (same logic as full snapshot)
+        val filesToCopy = mutableListOf<PhoneFile>()
+        var totalAlreadyOnDrive = 0
+        val perFolder = mutableListOf<FolderDiff>()
+
+        for (folderPath in phoneFolders) {
+            val phoneFolderFiles = allPhoneFiles.filter { it.phoneFolder == folderPath }
+
+            val driveKeys = mutableMapOf<String, DriveFileInfo>()
+            for ((drivePath, files) in driveFileCache) {
+                if (drivePath == folderPath || drivePath.startsWith("$folderPath/")) {
+                    for ((name, info) in files) {
+                        driveKeys["$drivePath|$name"] = info
+                    }
+                }
+            }
+
+            val phoneKeyMap = phoneFolderFiles.associateBy { "${it.drivePath}|${it.name}" }
+            var toCopy = 0; var toCopySize = 0L
+            var onDrive = 0; var onDriveSize = 0L
+
+            for (pf in phoneFolderFiles) {
+                val key = "${pf.drivePath}|${pf.name}"
+                val driveInfo = driveKeys[key]
+                if (driveInfo != null && driveInfo.size == pf.size) {
+                    onDrive++; onDriveSize += pf.size
+                } else {
+                    toCopy++; toCopySize += pf.size
+                    filesToCopy.add(pf)
+                }
+            }
+
+            var driveOnly = 0; var driveOnlySize = 0L
+            for ((key, info) in driveKeys) {
+                if (key !in phoneKeyMap) {
+                    driveOnly++; driveOnlySize += info.size
+                }
+            }
+
+            totalAlreadyOnDrive += onDrive
+
+            perFolder.add(FolderDiff(
+                phoneFolder = folderPath,
+                toCopy = toCopy,
+                toCopySize = toCopySize,
+                alreadyOnDrive = onDrive,
+                alreadyOnDriveSize = onDriveSize,
+                onDriveOnly = driveOnly,
+                onDriveOnlySize = driveOnlySize,
+                totalOnPhone = phoneFolderFiles.size,
+                totalOnDrive = driveKeys.size
+            ))
+        }
+
+        return SnapshotResult(
+            filesToCopy = filesToCopy,
+            totalBytesToCopy = filesToCopy.sumOf { it.size },
+            alreadyOnDrive = totalAlreadyOnDrive,
+            perFolder = perFolder,
+            allPhoneFiles = allPhoneFiles,
+            driveFileCache = driveFileCache,
+            dirDocIds = emptyMap()  // no dir doc IDs from manifest
+        )
+    }
+
     // ── Phase 2: Parallel Copy ────────────────────────────────────────────
 
     suspend fun parallelCopy(

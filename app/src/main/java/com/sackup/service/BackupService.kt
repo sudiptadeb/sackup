@@ -159,14 +159,27 @@ class BackupService : Service() {
 
         // ── Phase 1: Snapshot & Diff ──────────────────────────────────────
         currentPhase = "Scanning"
-        updateNotification("Scanning phone and drive...")
-        log("INFO", group.name, "Phase 1: Scanning...")
+        updateNotification("Scanning phone...")
+        log("INFO", group.name, "Phase 1: Snapshot & diff...")
 
         val syncTimestamp = System.currentTimeMillis() / 1000  // freeze point
 
+        // Use manifest for diff (instant) — no USB drive scanning
+        // Full drive scan only happens in Analyze or on first backup
+        val manifestEntries = repo.getManifestForGroup(group.id)
+
         val snapshot: SnapshotResult
         try {
-            snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp)
+            if (manifestEntries.isNotEmpty()) {
+                // Fast path: manifest-based diff (no drive I/O)
+                log("INFO", group.name, "Using manifest (${manifestEntries.size} entries)")
+                snapshot = engine.snapshotFromManifest(phoneFolders, manifestEntries, syncTimestamp)
+            } else {
+                // First backup or empty manifest: full drive scan needed
+                log("INFO", group.name, "No manifest — scanning drive...")
+                updateNotification("Scanning drive (first backup)...")
+                snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp)
+            }
         } catch (e: Exception) {
             log("ERROR", group.name, "Scan failed: ${e.message}")
             finishBackup()
