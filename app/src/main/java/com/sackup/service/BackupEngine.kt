@@ -80,10 +80,13 @@ class BackupEngine(private val resolver: ContentResolver) {
 
     // ── Phase 1: Snapshot & Diff ──────────────────────────────────────────
 
+    class ScanCancelledException : Exception("Scan cancelled")
+
     fun snapshot(
         phoneFolders: List<String>,
         treeUri: Uri,
         syncTimestamp: Long = Long.MAX_VALUE,
+        isCancelled: (() -> Boolean)? = null,
         onProgress: ((phase: String, detail: String, filesFound: Int) -> Unit)? = null
     ): SnapshotResult {
         // 1. Get drive root doc ID
@@ -96,6 +99,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         var driveFilesFound = 0
 
         for (folderPath in phoneFolders) {
+            if (isCancelled?.invoke() == true) throw ScanCancelledException()
             onProgress?.invoke("Scanning drive", folderPath, driveFilesFound)
             val segments = folderPath.split("/")
             var currentDocId = rootDocId
@@ -113,7 +117,7 @@ class BackupEngine(private val resolver: ContentResolver) {
                 }
             }
             if (found) {
-                scanDriveCursor(treeUri, currentDocId, folderPath, driveFileCache, dirDocIds) { count ->
+                scanDriveCursor(treeUri, currentDocId, folderPath, driveFileCache, dirDocIds, isCancelled) { count ->
                     driveFilesFound = count
                     onProgress?.invoke("Scanning drive", folderPath, driveFilesFound)
                 }
@@ -435,6 +439,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         parentPath: String,
         files: MutableMap<String, MutableMap<String, DriveFileInfo>>,
         dirs: MutableMap<String, String>,
+        isCancelled: (() -> Boolean)? = null,
         onFileCount: ((Int) -> Unit)? = null
     ) {
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
@@ -452,6 +457,7 @@ class BackupEngine(private val resolver: ContentResolver) {
             val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
 
             while (cursor.moveToNext()) {
+                if (isCancelled?.invoke() == true) throw ScanCancelledException()
                 val docId = cursor.getString(idCol) ?: continue
                 val name = cursor.getString(nameCol) ?: continue
                 val mime = cursor.getString(mimeCol) ?: ""
@@ -460,7 +466,7 @@ class BackupEngine(private val resolver: ContentResolver) {
                     if (name.startsWith(".")) continue  // skip hidden dirs (.thumbnails, .trashed, etc.)
                     val childPath = "$parentPath/$name"
                     dirs[childPath] = docId
-                    scanDriveCursor(treeUri, docId, childPath, files, dirs, onFileCount)
+                    scanDriveCursor(treeUri, docId, childPath, files, dirs, isCancelled, onFileCount)
                 } else {
                     if (name.startsWith(".")) continue  // skip hidden files (.nomedia, .DS_Store, etc.)
                     val size = cursor.getLong(sizeCol)

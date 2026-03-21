@@ -114,12 +114,13 @@ class BackupService : Service() {
                     return START_NOT_STICKY
                 }
                 startForeground(NOTIFICATION_ID, buildNotification("Preparing backup..."))
+                val cachedSnapshot = pendingSnapshot  // grab before resetState clears it
                 resetState()
                 isRunning = true
                 isDone = false
                 cancelled = false
                 sessionId = UUID.randomUUID().toString().take(8)
-                backupJob = scope.launch { runBackup(groupId, driveUri) }
+                backupJob = scope.launch { runBackup(groupId, driveUri, cachedSnapshot) }
             }
             ACTION_CANCEL -> {
                 if (!cancelled) {
@@ -140,7 +141,7 @@ class BackupService : Service() {
         super.onDestroy()
     }
 
-    private suspend fun runBackup(groupId: Long, driveUri: Uri) {
+    private suspend fun runBackup(groupId: Long, driveUri: Uri, cachedSnapshot: SnapshotResult? = null) {
         val group = repo.getGroup(groupId)
         if (group == null) {
             log("ERROR", "", "Backup group not found")
@@ -162,13 +163,10 @@ class BackupService : Service() {
         val engine = BackupEngine(contentResolver)
 
         // ── Phase 1: Snapshot & Diff ──────────────────────────────────────
-        val cached = pendingSnapshot
-        pendingSnapshot = null
-
         val snapshot: SnapshotResult
-        if (cached != null) {
+        if (cachedSnapshot != null) {
             log("INFO", group.name, "Using cached scan from Analyze")
-            snapshot = cached
+            snapshot = cachedSnapshot
         } else {
             currentPhase = "Scanning"
             updateNotification("Scanning phone and drive...")
@@ -177,10 +175,14 @@ class BackupService : Service() {
             val syncTimestamp = System.currentTimeMillis() / 1000  // freeze point
 
             try {
-                snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp) { phase, detail, count ->
+                snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp, isCancelled = { cancelled }) { phase, detail, count ->
                     currentFileName = if (detail.isNotEmpty()) "$phase: $detail ($count)" else "$phase ($count)"
                     updateNotification(currentFileName)
                 }
+            } catch (_: BackupEngine.ScanCancelledException) {
+                log("INFO", group.name, "Scan cancelled by user")
+                finishBackup()
+                return
             } catch (e: Exception) {
                 log("ERROR", group.name, "Scan failed: ${e.message}")
                 finishBackup()
