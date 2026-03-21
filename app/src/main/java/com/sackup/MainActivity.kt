@@ -311,6 +311,7 @@ class MainActivity : ComponentActivity() {
 
                         var analyzeSummary by remember { mutableStateOf<AnalyzeSummary?>(null) }
                         var isLoading by remember { mutableStateOf(true) }
+                        var scanStatus by remember { mutableStateOf("") }
 
                         LaunchedEffect(groupId) {
                             val group = repo.getGroup(groupId)
@@ -323,7 +324,13 @@ class MainActivity : ComponentActivity() {
                                 if (uri != null && driveConnected) {
                                     val engine = BackupEngine(contentResolver)
                                     val snapshot = withContext(Dispatchers.IO) {
-                                        engine.snapshot(phoneFolders, uri)
+                                        engine.snapshot(phoneFolders, uri) { phase, detail, count ->
+                                            scanStatus = if (detail.isNotEmpty()) {
+                                                "$phase: $detail ($count files)"
+                                            } else {
+                                                "$phase ($count files)"
+                                            }
+                                        }
                                     }
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
@@ -348,6 +355,7 @@ class MainActivity : ComponentActivity() {
                         AnalyzeScreen(
                             summary = analyzeSummary,
                             isLoading = isLoading,
+                            scanStatus = scanStatus,
                             onSyncNow = {
                                 val uri = driveUri
                                 if (uri != null) {

@@ -81,17 +81,20 @@ class BackupEngine(private val resolver: ContentResolver) {
     fun snapshot(
         phoneFolders: List<String>,
         treeUri: Uri,
-        syncTimestamp: Long = Long.MAX_VALUE  // only include files with DATE_MODIFIED <= this
+        syncTimestamp: Long = Long.MAX_VALUE,
+        onProgress: ((phase: String, detail: String, filesFound: Int) -> Unit)? = null
     ): SnapshotResult {
         // 1. Get drive root doc ID
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
 
-        // 2. Scan drive using DocumentsContract cursors (fast)
+        // 2. Scan drive using DocumentsContract cursors
         val driveFileCache = mutableMapOf<String, MutableMap<String, DriveFileInfo>>()
         val dirDocIds = mutableMapOf<String, String>()
+        scanFileCount = 0
+        var driveFilesFound = 0
 
         for (folderPath in phoneFolders) {
-            // Navigate multi-segment paths from root (e.g. "WhatsApp/Media")
+            onProgress?.invoke("Scanning drive", folderPath, driveFilesFound)
             val segments = folderPath.split("/")
             var currentDocId = rootDocId
             var currentPath = ""
@@ -108,15 +111,22 @@ class BackupEngine(private val resolver: ContentResolver) {
                 }
             }
             if (found) {
-                scanDriveCursor(treeUri, currentDocId, folderPath, driveFileCache, dirDocIds)
+                scanDriveCursor(treeUri, currentDocId, folderPath, driveFileCache, dirDocIds) { count ->
+                    driveFilesFound = count
+                    onProgress?.invoke("Scanning drive", folderPath, driveFilesFound)
+                }
             }
         }
 
         // 3. Query phone files from MediaStore with timestamp filter
+        onProgress?.invoke("Scanning phone", "", driveFilesFound)
         val allPhoneFiles = mutableListOf<PhoneFile>()
         for (folderPath in phoneFolders) {
             allPhoneFiles.addAll(queryPhoneFiles(folderPath, folderPath, syncTimestamp))
+            onProgress?.invoke("Scanning phone", folderPath, allPhoneFiles.size)
         }
+
+        onProgress?.invoke("Computing diff", "${allPhoneFiles.size} phone, $driveFilesFound drive", 0)
 
         // 4. Diff per folder
         val filesToCopy = mutableListOf<PhoneFile>()
@@ -412,12 +422,15 @@ class BackupEngine(private val resolver: ContentResolver) {
 
     // ── Drive scanning with DocumentsContract cursors ─────────────────────
 
+    private var scanFileCount = 0  // mutable counter for recursive scan
+
     private fun scanDriveCursor(
         treeUri: Uri,
         parentDocId: String,
         parentPath: String,
         files: MutableMap<String, MutableMap<String, DriveFileInfo>>,
-        dirs: MutableMap<String, String>
+        dirs: MutableMap<String, String>,
+        onFileCount: ((Int) -> Unit)? = null
     ) {
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocId)
         val projection = arrayOf(
@@ -441,13 +454,18 @@ class BackupEngine(private val resolver: ContentResolver) {
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                     val childPath = "$parentPath/$name"
                     dirs[childPath] = docId
-                    scanDriveCursor(treeUri, docId, childPath, files, dirs)
+                    scanDriveCursor(treeUri, docId, childPath, files, dirs, onFileCount)
                 } else {
                     val size = cursor.getLong(sizeCol)
                     files.getOrPut(parentPath) { mutableMapOf() }[name] = DriveFileInfo(size, docId)
+                    scanFileCount++
+                    if (scanFileCount % 50 == 0) {
+                        onFileCount?.invoke(scanFileCount)
+                    }
                 }
             }
         }
+        onFileCount?.invoke(scanFileCount)
     }
 
     private fun findChildDocId(treeUri: Uri, parentDocId: String, childName: String): String? {
