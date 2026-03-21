@@ -340,12 +340,18 @@ class MainActivity : ComponentActivity() {
                                         totalToCopySize = snapshot.totalBytesToCopy
                                     )
                                 } else {
+                                    // Drive not connected — use manifest for offline analysis
+                                    val engine = BackupEngine(contentResolver)
+                                    val manifestEntries = repo.getSuccessfulManifest(groupId)
+                                    val snapshot = withContext(Dispatchers.IO) {
+                                        engine.snapshotFromManifest(phoneFolders, manifestEntries)
+                                    }
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
-                                        folders = emptyList(),
+                                        folders = snapshot.perFolder,
                                         driveConnected = false,
-                                        totalToCopy = 0,
-                                        totalToCopySize = 0
+                                        totalToCopy = snapshot.filesToCopy.size,
+                                        totalToCopySize = snapshot.totalBytesToCopy
                                     )
                                 }
                             }

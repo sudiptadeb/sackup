@@ -201,8 +201,6 @@ class BackupService : Service() {
         updateNotification("Copying ${snapshot.filesToCopy.size} files...")
         log("INFO", group.name, "Phase 2: Copying with ${BackupEngine.WORKER_COUNT} workers, ${BackupEngine.BUFFER_SIZE / 1024 / 1024}MB buffers...")
 
-        val copiedFileKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
         val copyResult: CopyResult
         try {
             copyResult = engine.parallelCopy(
@@ -216,10 +214,6 @@ class BackupService : Service() {
                     bytesPerSecond = speed
                     progressPercent = if (totalFiles > 0) (completed * 100 / totalFiles) else 0
                     updateNotification("Copying: $fileName ($completed/$totalFiles)")
-
-                    // Track successfully copied files (the callback fires after success)
-                    val pf = snapshot.filesToCopy.getOrNull(completed - 1)
-                    if (pf != null) copiedFileKeys.add("${pf.drivePath}|${pf.name}")
                 }
             )
         } catch (_: kotlinx.coroutines.CancellationException) {
@@ -265,7 +259,7 @@ class BackupService : Service() {
         updateNotification("Updating manifest...")
         log("INFO", group.name, "Phase 3: Rebuilding manifest...")
         val backupSuccess = copyResult.failedCount == 0
-        rebuildManifest(group.id, engine, snapshot, copiedFileKeys, backupSuccess)
+        rebuildManifest(group.id, engine, snapshot, copyResult.copiedFileKeys, backupSuccess)
         log("INFO", group.name, "Manifest updated")
 
         finishBackup()
