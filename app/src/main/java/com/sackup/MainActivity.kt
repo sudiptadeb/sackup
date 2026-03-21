@@ -242,6 +242,7 @@ class MainActivity : ComponentActivity() {
                         var folders by remember { mutableStateOf<List<FolderClearInfo>>(emptyList()) }
                         var fileUris by remember { mutableStateOf<Map<Long, Uri>>(emptyMap()) }
                         var isLoading by remember { mutableStateOf(true) }
+                        var deleteProgressText by remember { mutableStateOf("") }
 
                         LaunchedEffect(groupId) {
                             group = repo.getGroup(groupId)
@@ -285,14 +286,19 @@ class MainActivity : ComponentActivity() {
                             groupName = group?.name ?: "",
                             folders = folders,
                             isLoading = isLoading,
+                            loadingStatus = deleteProgressText,
                             onDeleteEntries = { entries ->
+                                isLoading = true
                                 scope.launch {
-                                    val deleted = deleteFilesFromPhone(entries)
-                                    if (deleted > 0) {
-                                        repo.removeManifestEntries(entries.take(deleted).map { it.id })
+                                    val deletedIds = deleteFilesFromPhone(entries) { done, total ->
+                                        deleteProgressText = "Deleting $done of $total files..."
+                                    }
+                                    deleteProgressText = ""
+                                    if (deletedIds.isNotEmpty()) {
+                                        repo.removeManifestEntries(deletedIds)
                                         Toast.makeText(
                                             this@MainActivity,
-                                            "Deleted $deleted files",
+                                            "Deleted ${deletedIds.size} files",
                                             Toast.LENGTH_SHORT
                                         ).show()
                                     }
@@ -518,30 +524,34 @@ class MainActivity : ComponentActivity() {
      * Delete files from phone via MediaStore. Matches by RELATIVE_PATH + DISPLAY_NAME + SIZE.
      * Returns the number of files successfully deleted.
      */
-    private suspend fun deleteFilesFromPhone(entries: List<ManifestEntry>): Int =
-        withContext(Dispatchers.IO) {
-            var deleted = 0
-            val collection = MediaStore.Files.getContentUri("external")
+    private suspend fun deleteFilesFromPhone(
+        entries: List<ManifestEntry>,
+        onProgress: ((done: Int, total: Int) -> Unit)? = null
+    ): List<Long> = withContext(Dispatchers.IO) {
+        val deletedIds = mutableListOf<Long>()
+        val total = entries.size
+        val collection = MediaStore.Files.getContentUri("external")
 
-            for (entry in entries) {
-                try {
-                    // Find the file in MediaStore
-                    val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
-                            "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
-                            "${MediaStore.Files.FileColumns.SIZE} = ?"
-                    val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
+        for ((index, entry) in entries.withIndex()) {
+            try {
+                val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
+                        "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
+                        "${MediaStore.Files.FileColumns.SIZE} = ?"
+                val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
 
-                    val count = contentResolver.delete(collection, selection, args)
-                    if (count > 0) deleted++
-                } catch (e: SecurityException) {
-                    // On Android 11+, may need createDeleteRequest for files not owned by us
-                    // For now, skip and count as not deleted
-                } catch (_: Exception) {
-                    // Skip failed deletions
+                val count = contentResolver.delete(collection, selection, args)
+                if (count > 0) deletedIds.add(entry.id)
+            } catch (_: SecurityException) {
+            } catch (_: Exception) {
+            }
+            if ((index + 1) % 10 == 0 || index == total - 1) {
+                withContext(Dispatchers.Main) {
+                    onProgress?.invoke(index + 1, total)
                 }
             }
-            deleted
         }
+        deletedIds
+    }
 
     private suspend fun refreshLogs() {
         val updated = repo.getAllLogs()
