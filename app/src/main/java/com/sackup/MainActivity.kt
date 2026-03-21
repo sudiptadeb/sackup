@@ -21,6 +21,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import android.provider.MediaStore
 import com.sackup.service.BackupEngine
+import com.sackup.service.SnapshotResult
 import com.sackup.data.BackupGroup
 import com.sackup.data.BackupRepository
 import com.sackup.data.LogEntry
@@ -311,6 +312,7 @@ class MainActivity : ComponentActivity() {
                         val groupId = backStackEntry.arguments?.getLong("groupId") ?: return@composable
 
                         var analyzeSummary by remember { mutableStateOf<AnalyzeSummary?>(null) }
+                        var cachedSnapshot by remember { mutableStateOf<SnapshotResult?>(null) }
                         var isLoading by remember { mutableStateOf(true) }
                         var scanStatus by remember { mutableStateOf("") }
                         var scanElapsedSeconds by remember { mutableLongStateOf(0L) }
@@ -343,6 +345,7 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
                                     }
+                                    cachedSnapshot = snapshot
                                     val scanDuration = (System.currentTimeMillis() - scanStartTime) / 1000
                                     analyzeSummary = AnalyzeSummary(
                                         groupName = group.name,
@@ -381,6 +384,7 @@ class MainActivity : ComponentActivity() {
                             onSyncNow = {
                                 val uri = driveUri
                                 if (uri != null) {
+                                    BackupService.pendingSnapshot = cachedSnapshot
                                     BackupService.start(this@MainActivity, groupId, uri)
                                     navController.popBackStack()
                                     navController.navigate(Routes.PROGRESS)
