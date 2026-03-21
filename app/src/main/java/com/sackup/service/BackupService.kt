@@ -48,6 +48,9 @@ class BackupService : Service() {
         @Volatile var endTimeMillis = 0L
         @Volatile var bytesPerSecond = 0L
 
+        // Cached snapshot from Analyze — skip re-scanning if available
+        @Volatile var pendingSnapshot: SnapshotResult? = null
+
         fun start(context: Context, groupId: Long, driveUri: Uri) {
             val intent = Intent(context, BackupService::class.java).apply {
                 action = ACTION_START
@@ -81,6 +84,7 @@ class BackupService : Service() {
             startTimeMillis = 0L
             endTimeMillis = 0L
             bytesPerSecond = 0L
+            pendingSnapshot = null
         }
     }
 
@@ -158,22 +162,30 @@ class BackupService : Service() {
         val engine = BackupEngine(contentResolver)
 
         // ── Phase 1: Snapshot & Diff ──────────────────────────────────────
-        currentPhase = "Scanning"
-        updateNotification("Scanning phone and drive...")
-        log("INFO", group.name, "Phase 1: Scanning phone and drive...")
-
-        val syncTimestamp = System.currentTimeMillis() / 1000  // freeze point
+        val cached = pendingSnapshot
+        pendingSnapshot = null
 
         val snapshot: SnapshotResult
-        try {
-            snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp) { phase, detail, count ->
-                currentFileName = if (detail.isNotEmpty()) "$phase: $detail ($count)" else "$phase ($count)"
-                updateNotification(currentFileName)
+        if (cached != null) {
+            log("INFO", group.name, "Using cached scan from Analyze")
+            snapshot = cached
+        } else {
+            currentPhase = "Scanning"
+            updateNotification("Scanning phone and drive...")
+            log("INFO", group.name, "Phase 1: Scanning phone and drive...")
+
+            val syncTimestamp = System.currentTimeMillis() / 1000  // freeze point
+
+            try {
+                snapshot = engine.snapshot(phoneFolders, driveUri, syncTimestamp) { phase, detail, count ->
+                    currentFileName = if (detail.isNotEmpty()) "$phase: $detail ($count)" else "$phase ($count)"
+                    updateNotification(currentFileName)
+                }
+            } catch (e: Exception) {
+                log("ERROR", group.name, "Scan failed: ${e.message}")
+                finishBackup()
+                return
             }
-        } catch (e: Exception) {
-            log("ERROR", group.name, "Scan failed: ${e.message}")
-            finishBackup()
-            return
         }
 
         if (cancelled) { finishBackup(); return }
