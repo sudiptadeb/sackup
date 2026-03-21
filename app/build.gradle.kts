@@ -61,6 +61,20 @@ android {
     buildFeatures {
         compose = true
     }
+
+    applicationVariants.all {
+        val variant = this
+        variant.outputs.all {
+            val output = this
+            variant.assembleProvider.get().doLast {
+                val src = output.outputFile
+                val dest = rootProject.file("release/${src.name}")
+                dest.parentFile.mkdirs()
+                src.copyTo(dest, overwrite = true)
+                println("Copied ${src.name} → release/")
+            }
+        }
+    }
 }
 
 dependencies {
