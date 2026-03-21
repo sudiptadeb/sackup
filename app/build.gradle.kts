@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -10,11 +12,18 @@ android {
     compileSdk = 35
 
     signingConfigs {
-        create("release") {
-            storeFile = rootProject.file("sackup-release.jks")
-            storePassword = "sackup123"
-            keyAlias = "sackup"
-            keyPassword = "sackup123"
+        val keystoreFile = rootProject.file("sackup-release.jks")
+        if (keystoreFile.exists()) {
+            val props = Properties().apply {
+                rootProject.file("local.properties").takeIf { it.exists() }
+                    ?.reader()?.use { load(it) }
+            }
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = props.getProperty("signing.storePassword", "")
+                keyAlias = props.getProperty("signing.keyAlias", "")
+                keyPassword = props.getProperty("signing.keyPassword", "")
+            }
         }
     }
 
@@ -28,10 +37,10 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
         }
         release {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
