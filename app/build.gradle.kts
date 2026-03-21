@@ -9,6 +9,15 @@ android {
     namespace = "com.sackup"
     compileSdk = 35
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("sackup-release.jks")
+            storePassword = "sackup123"
+            keyAlias = "sackup"
+            keyPassword = "sackup123"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.sackup"
         minSdk = 26
@@ -18,7 +27,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("release")
+        }
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
