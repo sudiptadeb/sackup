@@ -142,21 +142,27 @@ class BackupService : Service() {
     }
 
     private suspend fun runBackup(groupId: Long, driveUri: Uri, cachedSnapshot: SnapshotResult? = null) {
+        try {
+            runBackupInner(groupId, driveUri, cachedSnapshot)
+        } finally {
+            finishBackup()
+        }
+    }
+
+    private suspend fun runBackupInner(groupId: Long, driveUri: Uri, cachedSnapshot: SnapshotResult?) {
         val group = repo.getGroup(groupId)
         if (group == null) {
-            log("ERROR", "", "Backup group not found")
-            finishBackup()
+            withContext(kotlinx.coroutines.NonCancellable) { log("ERROR", "", "Backup group not found") }
             return
         }
 
         currentGroupName = group.name
-        log("INFO", group.name, "Starting backup for ${group.name}")
+        withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Starting backup for ${group.name}") }
 
         val phoneFolders: List<String> = try {
             Gson().fromJson(group.phoneFolders, object : TypeToken<List<String>>() {}.type)
         } catch (e: Exception) {
-            log("ERROR", group.name, "Invalid folder configuration: ${e.message}")
-            finishBackup()
+            withContext(kotlinx.coroutines.NonCancellable) { log("ERROR", group.name, "Invalid folder configuration: ${e.message}") }
             return
         }
 
@@ -165,12 +171,12 @@ class BackupService : Service() {
         // ── Phase 1: Snapshot & Diff ──────────────────────────────────────
         val snapshot: SnapshotResult
         if (cachedSnapshot != null) {
-            log("INFO", group.name, "Using cached scan from Analyze")
+            withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Using cached scan from Analyze") }
             snapshot = cachedSnapshot
         } else {
             currentPhase = "Scanning"
             updateNotification("Scanning phone and drive...")
-            log("INFO", group.name, "Phase 1: Scanning phone and drive...")
+            withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Phase 1: Scanning phone and drive...") }
 
             val syncTimestamp = System.currentTimeMillis() / 1000  // freeze point
 
@@ -180,32 +186,31 @@ class BackupService : Service() {
                     updateNotification(currentFileName)
                 }
             } catch (_: BackupEngine.ScanCancelledException) {
-                log("INFO", group.name, "Scan cancelled by user")
-                finishBackup()
+                withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Scan cancelled by user") }
                 return
             } catch (e: Exception) {
-                log("ERROR", group.name, "Scan failed: ${e.message}")
-                finishBackup()
+                withContext(kotlinx.coroutines.NonCancellable) { log("ERROR", group.name, "Scan failed: ${e.message}") }
                 return
             }
         }
 
-        if (cancelled) { finishBackup(); return }
+        if (cancelled) return
 
         totalFiles = snapshot.filesToCopy.size
         totalBytes = snapshot.totalBytesToCopy
         skippedFiles = snapshot.alreadyOnDrive
 
-        log("INFO", group.name,
-            "${snapshot.filesToCopy.size} files to copy (${formatBytes(snapshot.totalBytesToCopy)}), " +
-            "${snapshot.alreadyOnDrive} already on drive")
+        withContext(kotlinx.coroutines.NonCancellable) {
+            log("INFO", group.name,
+                "${snapshot.filesToCopy.size} files to copy (${formatBytes(snapshot.totalBytesToCopy)}), " +
+                "${snapshot.alreadyOnDrive} already on drive")
+        }
 
         if (snapshot.filesToCopy.isEmpty()) {
-            log("INFO", group.name, "Everything is already backed up")
+            withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Everything is already backed up") }
             // Still rebuild manifest
             currentPhase = "Finishing"
-            rebuildManifest(group.id, engine, snapshot, emptySet(), true)
-            finishBackup()
+            withContext(kotlinx.coroutines.NonCancellable) { rebuildManifest(group.id, engine, snapshot, emptySet(), true) }
             return
         }
 
@@ -213,7 +218,9 @@ class BackupService : Service() {
         currentPhase = "Copying"
         startTimeMillis = System.currentTimeMillis()
         updateNotification("Copying ${snapshot.filesToCopy.size} files...")
-        log("INFO", group.name, "Phase 2: Copying with ${BackupEngine.WORKER_COUNT} workers, ${BackupEngine.BUFFER_SIZE / 1024 / 1024}MB buffers...")
+        withContext(kotlinx.coroutines.NonCancellable) {
+            log("INFO", group.name, "Phase 2: Copying with ${BackupEngine.WORKER_COUNT} workers, ${BackupEngine.BUFFER_SIZE / 1024 / 1024}MB buffers...")
+        }
 
         val copyResult: CopyResult
         try {
@@ -231,14 +238,12 @@ class BackupService : Service() {
                 }
             )
         } catch (_: kotlinx.coroutines.CancellationException) {
-            log("INFO", group.name, "Backup cancelled — copy workers stopped")
-            finishBackup()
+            withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Backup cancelled") }
             return
         }
 
         if (cancelled) {
-            log("INFO", group.name, "Backup cancelled after copying $completedFiles/$totalFiles files")
-            finishBackup()
+            withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, "Backup cancelled after copying $completedFiles/$totalFiles files") }
             return
         }
 
@@ -257,7 +262,7 @@ class BackupService : Service() {
             }
             append(".")
         }
-        log("INFO", group.name, summary)
+        withContext(kotlinx.coroutines.NonCancellable) { log("INFO", group.name, summary) }
 
         // Update group stats
         repo.updateGroup(
@@ -271,12 +276,12 @@ class BackupService : Service() {
         // ── Phase 3: Manifest rebuild ─────────────────────────────────────
         currentPhase = "Finishing"
         updateNotification("Updating manifest...")
-        log("INFO", group.name, "Phase 3: Rebuilding manifest...")
-        val backupSuccess = copyResult.failedCount == 0
-        rebuildManifest(group.id, engine, snapshot, copyResult.copiedFileKeys, backupSuccess)
-        log("INFO", group.name, "Manifest updated")
-
-        finishBackup()
+        withContext(kotlinx.coroutines.NonCancellable) {
+            log("INFO", group.name, "Phase 3: Rebuilding manifest...")
+            val backupSuccess = copyResult.failedCount == 0
+            rebuildManifest(group.id, engine, snapshot, copyResult.copiedFileKeys, backupSuccess)
+            log("INFO", group.name, "Manifest updated")
+        }
     }
 
     private suspend fun rebuildManifest(
