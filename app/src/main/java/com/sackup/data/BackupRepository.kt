@@ -21,20 +21,20 @@ class BackupRepository(context: Context) {
         if (groupDao.count() > 0) return
         groupDao.insert(
             BackupGroup(
-                name = "Camera",
+                name = "Images",
                 phoneFolders = "[\"DCIM\",\"Pictures\"]"
             )
         )
         groupDao.insert(
             BackupGroup(
-                name = "Downloads",
-                phoneFolders = "[\"Download\"]"
+                name = "Documents",
+                phoneFolders = "[\"Documents\"]"
             )
         )
         groupDao.insert(
             BackupGroup(
-                name = "WhatsApp",
-                phoneFolders = "[\"WhatsApp/Media\"]"
+                name = "Music",
+                phoneFolders = "[\"Music\"]"
             )
         )
     }
