@@ -160,10 +160,11 @@ class BackupEngine(private val resolver: ContentResolver) {
                     onDrive++; onDriveSize += pf.size
                 } else {
                     if (driveInfo != null && driveInfo.size != pf.size) {
-                        // Partial file on drive — delete it so the full copy can replace it
+                        // Partial file on drive — rename with __ prefix instead of deleting
+                        // Repeated partials accumulate prefixes: __IMG.jpg → ____IMG.jpg
                         try {
                             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, driveInfo.documentId)
-                            DocumentsContract.deleteDocument(resolver, docUri)
+                            DocumentsContract.renameDocument(resolver, docUri, "__${pf.name}")
                             driveFileCache[pf.drivePath]?.remove(pf.name)
                         } catch (_: Exception) {}
                     }
