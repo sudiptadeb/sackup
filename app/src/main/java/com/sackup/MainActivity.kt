@@ -290,7 +290,7 @@ class MainActivity : ComponentActivity() {
                                 // Batch-resolve all file URIs upfront for smooth scrolling
                                 val allEntries = folders.flatMap { it.entries }
                                 fileUris = withContext(Dispatchers.IO) {
-                                    batchResolveFileUris(allEntries)
+                                    batchResolveFileUris(allEntries).mapValues { it.value.uri }
                                 }
 
                                 isLoading = false
@@ -428,17 +428,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** A resolved MediaStore file: its content URI plus whether it is a deletable media item. */
+    private data class ResolvedFile(val uri: Uri, val isMediaItem: Boolean)
+
     /**
      * Batch-resolve manifest entries to MediaStore content URIs.
-     * Groups by phonePath to minimize queries. Returns map of entry.id → URI.
+     * Groups by phone folder to minimize queries. Returns map of entry.id → ResolvedFile.
+     *
+     * Builds typed media URIs (image/video/audio) where possible so MediaStore.createDeleteRequest()
+     * accepts them, and flags non-media files (documents, etc.) which that API rejects.
      */
-    private fun batchResolveFileUris(entries: List<ManifestEntry>): Map<Long, Uri> {
-        val result = mutableMapOf<Long, Uri>()
+    private fun batchResolveFileUris(entries: List<ManifestEntry>): Map<Long, ResolvedFile> {
+        val result = mutableMapOf<Long, ResolvedFile>()
         val collection = MediaStore.Files.getContentUri("external")
         val projection = arrayOf(
             MediaStore.Files.FileColumns._ID,
             MediaStore.Files.FileColumns.DISPLAY_NAME,
-            MediaStore.Files.FileColumns.SIZE
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.MEDIA_TYPE
         )
 
         // Group by the configured phone folder and query that whole subtree. RELATIVE_PATH may or
@@ -457,12 +464,21 @@ class MainActivity : ComponentActivity() {
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
                 val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
                 val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+                val typeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
                 while (cursor.moveToNext()) {
                     val name = cursor.getString(nameCol) ?: continue
                     val size = cursor.getLong(sizeCol)
                     val entry = entryLookup["$name|$size"] ?: continue
                     val mediaId = cursor.getLong(idCol)
-                    result[entry.id] = android.content.ContentUris.withAppendedId(collection, mediaId)
+                    val mediaType = cursor.getInt(typeCol)
+                    val typedCollection = when (mediaType) {
+                        MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                        MediaStore.Files.FileColumns.MEDIA_TYPE_AUDIO -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                        else -> null
+                    }
+                    val uri = android.content.ContentUris.withAppendedId(typedCollection ?: collection, mediaId)
+                    result[entry.id] = ResolvedFile(uri, isMediaItem = typedCollection != null)
                 }
             }
         }
@@ -569,18 +585,44 @@ class MainActivity : ComponentActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // Resolve the actual MediaStore URIs for the requested entries.
-            val uriMap = withContext(Dispatchers.IO) { batchResolveFileUris(entries) }
-            val uris = uriMap.values.toList()
-            if (uris.isEmpty()) {
+            val resolved = withContext(Dispatchers.IO) { batchResolveFileUris(entries) }
+            if (resolved.isEmpty()) {
                 Log.w("SackUpDelete", "No MediaStore URIs resolved for ${entries.size} entries — nothing to delete")
                 return emptyList()
             }
 
-            onProgress?.invoke(0, uris.size)
-            val granted = requestDeleteConsent(uris)
-            Log.d("SackUpDelete", "Consent for ${uris.size} URIs granted=$granted")
-            // createDeleteRequest is all-or-nothing: on consent the OS deletes every URI in the batch.
-            return if (granted) uriMap.keys.toList() else emptyList()
+            // createDeleteRequest rejects the WHOLE batch with IllegalArgumentException if any URI is
+            // not an image/video/audio row ("All requested items must be Media items"). Split media
+            // from non-media: media go through the system consent dialog, the rest via direct delete.
+            val media = resolved.filterValues { it.isMediaItem }
+            val nonMedia = resolved.filterValues { !it.isMediaItem }
+            val deletedIds = mutableListOf<Long>()
+
+            if (media.isNotEmpty()) {
+                onProgress?.invoke(0, media.size)
+                val granted = requestDeleteConsent(media.values.map { it.uri })
+                Log.d("SackUpDelete", "Consent for ${media.size} media URIs granted=$granted")
+                // createDeleteRequest is all-or-nothing: on consent the OS deletes every URI.
+                if (granted) deletedIds.addAll(media.keys)
+            }
+
+            if (nonMedia.isNotEmpty()) {
+                Log.d("SackUpDelete", "${nonMedia.size} non-media file(s) — attempting direct delete")
+                val direct = withContext(Dispatchers.IO) {
+                    val ok = mutableListOf<Long>()
+                    for ((id, rf) in nonMedia) {
+                        try {
+                            if (contentResolver.delete(rf.uri, null, null) > 0) ok.add(id)
+                        } catch (e: Exception) {
+                            Log.w("SackUpDelete", "Direct delete failed for entry $id", e)
+                        }
+                    }
+                    ok
+                }
+                deletedIds.addAll(direct)
+            }
+
+            return deletedIds
         }
 
         // Legacy path (API <= 29): direct delete, matched by RELATIVE_PATH + DISPLAY_NAME + SIZE.
