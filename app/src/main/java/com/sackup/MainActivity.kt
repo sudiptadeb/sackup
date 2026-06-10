@@ -24,6 +24,7 @@ import androidx.navigation.navArgument
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import android.provider.MediaStore
+import android.util.Log
 import com.sackup.service.BackupEngine
 import com.sackup.service.SnapshotResult
 import com.sackup.data.BackupGroup
@@ -315,6 +316,12 @@ class MainActivity : ComponentActivity() {
                                             "Deleted ${deletedIds.size} files",
                                             Toast.LENGTH_SHORT
                                         ).show()
+                                    } else {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "No files were deleted — couldn't find them on the phone, or the request was cancelled",
+                                            Toast.LENGTH_LONG
+                                        ).show()
                                     }
                                     navController.popBackStack()
                                     navController.navigate(Routes.clearSpace(groupId))
@@ -434,12 +441,19 @@ class MainActivity : ComponentActivity() {
             MediaStore.Files.FileColumns.SIZE
         )
 
-        // Group entries by phonePath to batch queries
-        val byPath = entries.groupBy { it.phonePath }
-        for ((phonePath, pathEntries) in byPath) {
-            val entryLookup = pathEntries.associateBy { "${it.fileName}|${it.fileSize}" }
-            val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND ${MediaStore.Files.FileColumns.SIZE} > 0"
-            contentResolver.query(collection, projection, selection, arrayOf(phonePath), null)?.use { cursor ->
+        // Group by the configured phone folder and query that whole subtree. RELATIVE_PATH may or
+        // may not carry a trailing slash and files can live in subfolders, so match on "folder/%"
+        // OR "folder/" (same query queryFolderStats uses successfully) rather than an exact path
+        // match — a strict "RELATIVE_PATH = ?" silently returns zero rows on some OEM ROMs.
+        val byFolder = entries.groupBy { it.phoneFolder }
+        for ((folder, folderEntries) in byFolder) {
+            val normalized = folder.trim('/')
+            val entryLookup = folderEntries.associateBy { "${it.fileName}|${it.fileSize}" }
+            val selection = "(${MediaStore.Files.FileColumns.RELATIVE_PATH} LIKE ? OR " +
+                    "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ?) AND " +
+                    "${MediaStore.Files.FileColumns.SIZE} > 0"
+            val args = arrayOf("$normalized/%", "$normalized/")
+            contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
                 val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
                 val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
@@ -452,6 +466,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        Log.d("SackUpDelete", "Resolved ${result.size}/${entries.size} URIs across ${byFolder.size} folder(s)")
         return result
     }
 
@@ -556,10 +571,14 @@ class MainActivity : ComponentActivity() {
             // Resolve the actual MediaStore URIs for the requested entries.
             val uriMap = withContext(Dispatchers.IO) { batchResolveFileUris(entries) }
             val uris = uriMap.values.toList()
-            if (uris.isEmpty()) return emptyList()
+            if (uris.isEmpty()) {
+                Log.w("SackUpDelete", "No MediaStore URIs resolved for ${entries.size} entries — nothing to delete")
+                return emptyList()
+            }
 
             onProgress?.invoke(0, uris.size)
             val granted = requestDeleteConsent(uris)
+            Log.d("SackUpDelete", "Consent for ${uris.size} URIs granted=$granted")
             // createDeleteRequest is all-or-nothing: on consent the OS deletes every URI in the batch.
             return if (granted) uriMap.keys.toList() else emptyList()
         }
@@ -605,6 +624,7 @@ class MainActivity : ComponentActivity() {
                     IntentSenderRequest.Builder(pendingIntent.intentSender).build()
                 )
             } catch (e: Exception) {
+                Log.e("SackUpDelete", "createDeleteRequest/launch failed for ${uris.size} URIs", e)
                 deleteConsentCallback = null
                 cont.resume(false)
             }
