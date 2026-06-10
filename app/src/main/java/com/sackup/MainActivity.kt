@@ -1,6 +1,7 @@
 package com.sackup
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -9,7 +10,10 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
@@ -66,6 +70,16 @@ class MainActivity : ComponentActivity() {
                 .putString("drive_uri", uri.toString())
                 .apply()
         }
+    }
+
+    // Result of the system "delete these files?" consent dialog (scoped storage, API 30+)
+    private var deleteConsentCallback: ((Boolean) -> Unit)? = null
+    private val deleteRequestLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        val cb = deleteConsentCallback
+        deleteConsentCallback = null
+        cb?.invoke(result.resultCode == Activity.RESULT_OK)
     }
 
     // Permission request
@@ -521,37 +535,81 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Delete files from phone via MediaStore. Matches by RELATIVE_PATH + DISPLAY_NAME + SIZE.
-     * Returns the number of files successfully deleted.
+     * Delete files from phone storage.
+     *
+     * On Android 11+ (API 30+) an app may not delete media it didn't create with a plain
+     * contentResolver.delete() — that throws RecoverableSecurityException. Instead we resolve the
+     * content URIs and ask the OS to delete them via MediaStore.createDeleteRequest(), which shows
+     * a single system consent dialog for the whole batch. On confirmation the OS deletes the files.
+     *
+     * On API <= 29 (legacy storage) a direct delete works.
+     *
+     * Returns the ids of the manifest entries whose files were actually deleted.
      */
     private suspend fun deleteFilesFromPhone(
         entries: List<ManifestEntry>,
         onProgress: ((done: Int, total: Int) -> Unit)? = null
-    ): List<Long> = withContext(Dispatchers.IO) {
-        val deletedIds = mutableListOf<Long>()
-        val total = entries.size
-        val collection = MediaStore.Files.getContentUri("external")
+    ): List<Long> {
+        if (entries.isEmpty()) return emptyList()
 
-        for ((index, entry) in entries.withIndex()) {
-            try {
-                val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
-                        "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
-                        "${MediaStore.Files.FileColumns.SIZE} = ?"
-                val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Resolve the actual MediaStore URIs for the requested entries.
+            val uriMap = withContext(Dispatchers.IO) { batchResolveFileUris(entries) }
+            val uris = uriMap.values.toList()
+            if (uris.isEmpty()) return emptyList()
 
-                val count = contentResolver.delete(collection, selection, args)
-                if (count > 0) deletedIds.add(entry.id)
-            } catch (_: SecurityException) {
-            } catch (_: Exception) {
-            }
-            if ((index + 1) % 10 == 0 || index == total - 1) {
-                withContext(Dispatchers.Main) {
-                    onProgress?.invoke(index + 1, total)
+            onProgress?.invoke(0, uris.size)
+            val granted = requestDeleteConsent(uris)
+            // createDeleteRequest is all-or-nothing: on consent the OS deletes every URI in the batch.
+            return if (granted) uriMap.keys.toList() else emptyList()
+        }
+
+        // Legacy path (API <= 29): direct delete, matched by RELATIVE_PATH + DISPLAY_NAME + SIZE.
+        return withContext(Dispatchers.IO) {
+            val deletedIds = mutableListOf<Long>()
+            val total = entries.size
+            val collection = MediaStore.Files.getContentUri("external")
+
+            for ((index, entry) in entries.withIndex()) {
+                try {
+                    val selection = "${MediaStore.Files.FileColumns.RELATIVE_PATH} = ? AND " +
+                            "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND " +
+                            "${MediaStore.Files.FileColumns.SIZE} = ?"
+                    val args = arrayOf(entry.phonePath, entry.fileName, entry.fileSize.toString())
+
+                    val count = contentResolver.delete(collection, selection, args)
+                    if (count > 0) deletedIds.add(entry.id)
+                } catch (_: Exception) {
+                }
+                if ((index + 1) % 10 == 0 || index == total - 1) {
+                    withContext(Dispatchers.Main) {
+                        onProgress?.invoke(index + 1, total)
+                    }
                 }
             }
+            deletedIds
         }
-        deletedIds
     }
+
+    /**
+     * Ask the OS for permission to delete the given media URIs (Android 11+). Shows a single system
+     * dialog and suspends until the user confirms or cancels. Returns true if the user confirmed.
+     */
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun requestDeleteConsent(uris: List<Uri>): Boolean =
+        suspendCancellableCoroutine { cont ->
+            try {
+                val pendingIntent = MediaStore.createDeleteRequest(contentResolver, uris)
+                deleteConsentCallback = { granted -> cont.resume(granted) }
+                deleteRequestLauncher.launch(
+                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                )
+            } catch (e: Exception) {
+                deleteConsentCallback = null
+                cont.resume(false)
+            }
+            cont.invokeOnCancellation { deleteConsentCallback = null }
+        }
 
     private suspend fun refreshLogs() {
         val updated = repo.getAllLogs()
@@ -580,6 +638,11 @@ class MainActivity : ComponentActivity() {
             // Android 12 and below
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
                 perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            // Android 10 and below need write permission to delete files (legacy storage).
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
         }
 
