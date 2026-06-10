@@ -273,8 +273,18 @@ class MainActivity : ComponentActivity() {
                                     repo.getManifestForGroup(groupId)
                                 }
 
+                                // Resolve which backed-up files are still on the phone. Entries whose
+                                // file was removed outside the app (e.g. deleted manually) won't
+                                // resolve — they're still safe on the drive, but there's nothing left
+                                // to free, so drop them so the counts reflect what can actually be freed.
+                                val resolved = withContext(Dispatchers.IO) {
+                                    batchResolveFileUris(manifest)
+                                }
+                                fileUris = resolved.mapValues { it.value.uri }
+                                val onPhone = manifest.filter { it.id in resolved }
+
                                 folders = phoneFolders.map { phoneFolder ->
-                                    val successEntries = manifest.filter { it.phoneFolder == phoneFolder }
+                                    val successEntries = onPhone.filter { it.phoneFolder == phoneFolder }
                                         .sortedBy { it.dateModified }
                                     val allEntries = allManifest.filter { it.phoneFolder == phoneFolder }
                                     val hasSuccess = allEntries.isEmpty() || allEntries.any { it.backupSuccess }
@@ -285,12 +295,6 @@ class MainActivity : ComponentActivity() {
                                         hasSuccessfulBackup = hasSuccess && successEntries.isNotEmpty(),
                                         drivePath = if (driveName.isNotEmpty()) "$driveName/$phoneFolder" else phoneFolder
                                     )
-                                }
-
-                                // Batch-resolve all file URIs upfront for smooth scrolling
-                                val allEntries = folders.flatMap { it.entries }
-                                fileUris = withContext(Dispatchers.IO) {
-                                    batchResolveFileUris(allEntries).mapValues { it.value.uri }
                                 }
 
                                 isLoading = false
