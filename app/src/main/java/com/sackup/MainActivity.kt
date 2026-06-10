@@ -304,7 +304,7 @@ class MainActivity : ComponentActivity() {
                             onDeleteEntries = { entries ->
                                 isLoading = true
                                 scope.launch {
-                                    val deletedIds = deleteFilesFromPhone(entries) { done, total ->
+                                    val deletedIds = deleteFilesFromPhone(entries, fileUris) { done, total ->
                                         deleteProgressText = "Deleting $done of $total files..."
                                     }
                                     deleteProgressText = ""
@@ -548,20 +548,38 @@ class MainActivity : ComponentActivity() {
      */
     private suspend fun deleteFilesFromPhone(
         entries: List<ManifestEntry>,
+        preResolved: Map<Long, Uri> = emptyMap(),
         onProgress: ((done: Int, total: Int) -> Unit)? = null
     ): List<Long> {
         if (entries.isEmpty()) return emptyList()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Resolve the actual MediaStore URIs for the requested entries.
-            val uriMap = withContext(Dispatchers.IO) { batchResolveFileUris(entries) }
-            val uris = uriMap.values.toList()
-            if (uris.isEmpty()) return emptyList()
+            // Prefer URIs already resolved for the on-screen thumbnails; resolve any leftovers fresh.
+            val resolved = LinkedHashMap<Long, Uri>()
+            for (e in entries) preResolved[e.id]?.let { resolved[e.id] = it }
+            val missing = entries.filter { it.id !in resolved }
+            if (missing.isNotEmpty()) {
+                val fresh = withContext(Dispatchers.IO) { batchResolveFileUris(missing) }
+                resolved.putAll(fresh)
+            }
 
-            onProgress?.invoke(0, uris.size)
-            val granted = requestDeleteConsent(uris)
+            if (resolved.isEmpty()) {
+                // Nothing matched in MediaStore — surface it instead of bouncing silently.
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Couldn't find these files in phone storage to delete. " +
+                            "They may already be gone, or the app wasn't granted full access to them.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                return emptyList()
+            }
+
+            onProgress?.invoke(0, resolved.size)
+            val granted = requestDeleteConsent(resolved.values.toList())
             // createDeleteRequest is all-or-nothing: on consent the OS deletes every URI in the batch.
-            return if (granted) uriMap.keys.toList() else emptyList()
+            return if (granted) resolved.keys.toList() else emptyList()
         }
 
         // Legacy path (API <= 29): direct delete, matched by RELATIVE_PATH + DISPLAY_NAME + SIZE.
