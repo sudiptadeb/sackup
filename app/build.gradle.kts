@@ -37,7 +37,11 @@ android {
 
     buildTypes {
         debug {
+            // Use the release keystore when present (local builds); otherwise
+            // fall back to the auto-generated debug keystore so CI produces a
+            // signed, installable app-debug.apk instead of an unsigned one.
             signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
         release {
             signingConfig = signingConfigs.findByName("release")
