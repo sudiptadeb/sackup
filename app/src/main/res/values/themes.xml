@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Light window theme used until Compose takes over (see values-night for dark). -->
     <style name="Theme.SackUp" parent="android:Theme.Material.Light.NoActionBar" />
 </resources>

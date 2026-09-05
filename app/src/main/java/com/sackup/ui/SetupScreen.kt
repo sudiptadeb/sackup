@@ -1,11 +1,8 @@
 package com.sackup.ui
 
-import android.net.Uri
-import android.os.Environment
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -16,8 +13,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -29,24 +32,35 @@ fun SetupScreen(
     onBack: () -> Unit,
 ) {
     var name by remember { mutableStateOf(initialName) }
-    var phoneFolders by remember { mutableStateOf(initialPhoneFolders.toMutableList().ifEmpty { mutableListOf() }) }
+    // Immutable list in state; every change replaces the whole value.
+    var phoneFolders by remember { mutableStateOf<List<String>>(initialPhoneFolders.toList()) }
+    var otherFolder by remember { mutableStateOf("") }
 
-    // SAF folder picker — extract relative path from internal storage
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            val relativePath = extractRelativePath(uri)
-            if (relativePath != null && relativePath !in phoneFolders) {
-                phoneFolders = (phoneFolders + relativePath).toMutableList()
-            }
-        }
+    fun isChosen(path: String) = phoneFolders.any { it.equals(path, ignoreCase = true) }
+    fun toggle(path: String) {
+        phoneFolders = if (isChosen(path))
+            phoneFolders.filterNot { it.equals(path, ignoreCase = true) }
+        else
+            addFolder(phoneFolders, path)
     }
+    fun addOther() {
+        val updated = addFolder(phoneFolders, otherFolder)
+        if (updated !== phoneFolders) phoneFolders = updated
+        otherFolder = ""
+    }
+
+    val canSave = name.isNotBlank() && phoneFolders.isNotEmpty()
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (isEdit) "Edit Backup Group" else "New Backup Group") },
+                title = {
+                    Text(
+                        if (isEdit) "Edit Backup" else "New Backup",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -59,113 +73,173 @@ fun SetupScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Group name
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Group Name") },
+                label = { Text("Backup name") },
                 placeholder = { Text("e.g. Camera, Downloads") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
 
-            // Phone folders
             Text(
-                "Phone Folders",
+                "What to back up",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "Select folders from your phone to back up",
-                style = MaterialTheme.typography.bodySmall,
+                "Tap the folders you want copied to the USB drive.",
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            for (i in phoneFolders.indices) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+            // Common folder choices
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (folder in COMMON_PHONE_FOLDERS) {
+                    FolderChoiceCard(
+                        label = folder.label,
+                        path = folder.path,
+                        chosen = isChosen(folder.path),
+                        onToggle = { toggle(folder.path) }
                     )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.Folder,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            phoneFolders[i],
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        IconButton(onClick = {
-                            phoneFolders = phoneFolders.toMutableList().apply { removeAt(i) }
-                        }) {
-                            Icon(Icons.Default.Close, contentDescription = "Remove")
+                }
+            }
+
+            // Folders the user typed that are not in the common list
+            val customFolders = phoneFolders.filter { p ->
+                COMMON_PHONE_FOLDERS.none { it.path.equals(p, ignoreCase = true) }
+            }
+            if (customFolders.isNotEmpty()) {
+                Text(
+                    "Other folders",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (path in customFolders) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Folder,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    path,
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                IconButton(onClick = {
+                                    phoneFolders = phoneFolders.filterNot { it == path }
+                                }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Remove $path")
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            // Initial URI pointing to internal storage root
-            val storageUri = Uri.Builder()
-                .scheme("content")
-                .authority("com.android.externalstorage.documents")
-                .appendPath("document")
-                .appendPath("primary:")
-                .build()
-
-            OutlinedButton(
-                onClick = { folderPickerLauncher.launch(storageUri) },
-                modifier = Modifier.fillMaxWidth()
+            // "Other folder" entry
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Select Phone Folder")
+                OutlinedTextField(
+                    value = otherFolder,
+                    onValueChange = { otherFolder = it },
+                    label = { Text("Other folder") },
+                    placeholder = { Text("e.g. Recordings") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { addOther() })
+                )
+                FilledTonalButton(
+                    onClick = { addOther() },
+                    enabled = normalizeFolderInput(otherFolder) != null,
+                    modifier = Modifier.heightIn(min = 56.dp)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add")
+                }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Text(
+                "On Android 11 and newer, SackUp can only see photos, videos and music, not other document types.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
-            // Save button
+            Spacer(Modifier.height(8.dp))
+
             Button(
-                onClick = {
-                    val folders = phoneFolders.filter { it.isNotBlank() }
-                    if (name.isNotBlank() && folders.isNotEmpty()) {
-                        onSave(name, folders)
-                    }
-                },
-                enabled = name.isNotBlank() && phoneFolders.isNotEmpty(),
+                onClick = { if (canSave) onSave(name.trim(), phoneFolders) },
+                enabled = canSave,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
+                    .heightIn(min = 56.dp)
             ) {
-                Text("Save", fontWeight = FontWeight.Bold)
+                Text("Save", fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
         }
     }
 }
 
-/**
- * Extracts the relative path from a SAF document tree URI.
- * e.g. content://com.android.externalstorage.documents/tree/primary%3ADCIM → "DCIM"
- * e.g. content://com.android.externalstorage.documents/tree/primary%3AWhatsApp%2FMedia → "WhatsApp/Media"
- */
-private fun extractRelativePath(uri: Uri): String? {
-    val treeId = uri.lastPathSegment ?: return null
-    // Format is "primary:relative/path" for internal storage
-    val colonIndex = treeId.indexOf(':')
-    if (colonIndex < 0) return null
-    val path = treeId.substring(colonIndex + 1)
-    return path.ifBlank { null }
+@Composable
+private fun FolderChoiceCard(
+    label: String,
+    path: String,
+    chosen: Boolean,
+    onToggle: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .toggleable(value = chosen, role = Role.Checkbox, onValueChange = { onToggle() }),
+        colors = CardDefaults.cardColors(
+            containerColor = if (chosen) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Checkbox(checked = chosen, onCheckedChange = null)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    path,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
 }
