@@ -1,0 +1,4 @@
+• Every copied file is now written all the way to the drive and checked before it counts as saved.
+• Clearer progress while copying and a plain-language summary when it finishes.
+• Asks you to confirm before deleting a backup group.
+• Now works on Android 8 and 9 too.

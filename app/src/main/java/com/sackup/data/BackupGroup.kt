@@ -28,9 +28,6 @@ interface BackupGroupDao {
 
     @Delete
     suspend fun delete(group: BackupGroup)
-
-    @Query("SELECT COUNT(*) FROM backup_groups")
-    suspend fun count(): Int
 }
 
 // ── Phone folder list codec ─────────────────────────────────────────────────

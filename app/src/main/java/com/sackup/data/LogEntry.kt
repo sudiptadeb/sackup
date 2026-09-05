@@ -20,7 +20,8 @@ interface LogEntryDao {
     @Query("SELECT * FROM log_entries WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC")
     suspend fun getBySession(sessionId: String): List<LogEntry>
 
-    @Query("SELECT DISTINCT sessionId FROM log_entries ORDER BY timestamp DESC")
+    /** Session ids, most recently active session first. */
+    @Query("SELECT sessionId FROM log_entries GROUP BY sessionId ORDER BY MAX(timestamp) DESC")
     suspend fun getSessionIds(): List<String>
 
     @Insert

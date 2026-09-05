@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark window theme so a cold start in dark mode does not flash a white window. -->
+    <style name="Theme.SackUp" parent="android:Theme.Material.NoActionBar" />
+</resources>

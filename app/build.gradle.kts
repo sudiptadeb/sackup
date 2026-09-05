@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -18,12 +19,21 @@ android {
                 rootProject.file("local.properties").takeIf { it.exists() }
                     ?.reader()?.use { load(it) }
             }
+            // Gradle properties (-Psigning.x=... or ~/.gradle/gradle.properties)
+            // win over local.properties so CI can inject secrets.
+            fun signingProp(name: String): String =
+                project.findProperty(name)?.toString() ?: props.getProperty(name, "")
             create("release") {
                 storeFile = keystoreFile
-                storePassword = props.getProperty("signing.storePassword", "")
-                keyAlias = props.getProperty("signing.keyAlias", "")
-                keyPassword = props.getProperty("signing.keyPassword", "")
+                storePassword = signingProp("signing.storePassword")
+                keyAlias = signingProp("signing.keyAlias")
+                keyPassword = signingProp("signing.keyPassword")
             }
+        } else {
+            logger.warn(
+                "SackUp: release keystore ${keystoreFile.name} not found — " +
+                    "builds will be signed with the debug keystore."
+            )
         }
     }
 
@@ -31,8 +41,8 @@ android {
         applicationId = "com.sackup"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     buildTypes {
@@ -58,12 +68,19 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
         compose = true
+    }
+
+    testOptions {
+        // Lets data classes that merely carry android.net.Uri load in plain JVM unit tests.
+        unitTests.isReturnDefaultValues = true
     }
 
     applicationVariants.all {
@@ -79,6 +96,11 @@ android {
             }
         }
     }
+}
+
+ksp {
+    // Export the Room schema so migrations can be reviewed and tested.
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -113,4 +135,9 @@ dependencies {
 
     // Coil for image loading/thumbnails
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // Unit tests (plain JVM, run with ./gradlew testDebugUnitTest)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.mockito:mockito-core:5.14.2")
 }

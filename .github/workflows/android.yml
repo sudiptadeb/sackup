@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,8 +32,48 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon
+      # Secrets cannot be referenced in `if:` directly, so expose their presence
+      # as an env var first. When RELEASE_KEYSTORE_B64 is unset the build falls
+      # back to the debug keystore (app/build.gradle.kts logs a warning).
+      - name: Check for release keystore
+        run: |
+          if [ -n "${{ secrets.RELEASE_KEYSTORE_B64 }}" ]; then
+            echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_KEYSTORE=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Decode release keystore
+        if: ${{ env.HAS_KEYSTORE == 'true' }}
+        run: echo "${{ secrets.RELEASE_KEYSTORE_B64 }}" | base64 --decode > sackup-release.jks
+
+      - name: Set signing properties
+        if: ${{ env.HAS_KEYSTORE == 'true' }}
+        run: |
+          {
+            echo "SIGNING_ARGS=-Psigning.storePassword=${{ secrets.RELEASE_STORE_PASSWORD }} -Psigning.keyAlias=${{ secrets.RELEASE_KEY_ALIAS }} -Psigning.keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}"
+          } >> "$GITHUB_ENV"
+
+      - name: Lint, unit tests, debug APK
+        run: ./gradlew lint testDebugUnitTest assembleDebug --no-daemon ${SIGNING_ARGS:-}
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-*.html
+          if-no-files-found: ignore
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -43,3 +87,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: app/build/outputs/apk/debug/*.apk
+
+      - name: Remove decoded keystore
+        if: ${{ always() && env.HAS_KEYSTORE == 'true' }}
+        run: rm -f sackup-release.jks

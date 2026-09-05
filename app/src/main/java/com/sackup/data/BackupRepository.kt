@@ -1,9 +1,11 @@
 package com.sackup.data
 
 import android.content.Context
+import androidx.room.withTransaction
 
 class BackupRepository(context: Context) {
-    private val db = AppDatabase.get(context)
+    private val appContext = context.applicationContext
+    private val db = AppDatabase.get(appContext)
     private val groupDao = db.backupGroupDao()
     private val logDao = db.logEntryDao()
     private val manifestDao = db.manifestEntryDao()
@@ -13,30 +15,29 @@ class BackupRepository(context: Context) {
     suspend fun getGroup(id: Long): BackupGroup? = groupDao.getById(id)
     suspend fun insertGroup(group: BackupGroup): Long = groupDao.insert(group)
     suspend fun updateGroup(group: BackupGroup) = groupDao.update(group)
-    suspend fun deleteGroup(group: BackupGroup) = groupDao.delete(group)
-    suspend fun groupCount(): Int = groupDao.count()
 
-    // Seed default groups if empty
+    /** Deletes the group together with its manifest rows, atomically. */
+    suspend fun deleteGroup(group: BackupGroup) {
+        db.withTransaction {
+            manifestDao.deleteByGroup(group.id)
+            groupDao.delete(group)
+        }
+    }
+
+    /**
+     * Seeds the default backup groups exactly once per install. Gated by a
+     * SharedPreferences flag rather than `count() == 0` so a user who deletes
+     * every default group does not get them re-created on the next launch.
+     */
     suspend fun seedDefaults() {
-        if (groupDao.count() > 0) return
-        groupDao.insert(
-            BackupGroup(
-                name = "Images",
-                phoneFolders = "[\"DCIM\",\"Pictures\"]"
-            )
-        )
-        groupDao.insert(
-            BackupGroup(
-                name = "Documents",
-                phoneFolders = "[\"Documents\"]"
-            )
-        )
-        groupDao.insert(
-            BackupGroup(
-                name = "Music",
-                phoneFolders = "[\"Music\"]"
-            )
-        )
+        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_DEFAULTS_SEEDED, false)) return
+        db.withTransaction {
+            if (groupDao.getAll().isEmpty()) {
+                for (group in defaultGroups()) groupDao.insert(group)
+            }
+        }
+        prefs.edit().putBoolean(KEY_DEFAULTS_SEEDED, true).apply()
     }
 
     // Logs
@@ -55,13 +56,42 @@ class BackupRepository(context: Context) {
     // Manifest
     suspend fun getManifestForGroup(groupId: Long): List<ManifestEntry> = manifestDao.getByGroup(groupId)
     suspend fun getSuccessfulManifest(groupId: Long): List<ManifestEntry> = manifestDao.getSuccessfulByGroup(groupId)
-    suspend fun getSuccessfulManifestByFolder(groupId: Long, phoneFolder: String): List<ManifestEntry> =
-        manifestDao.getSuccessfulByFolder(groupId, phoneFolder)
+
+    /** Replaces the group's manifest atomically: readers never see a half-written manifest. */
     suspend fun rebuildManifest(groupId: Long, entries: List<ManifestEntry>) {
-        manifestDao.deleteByGroup(groupId)
-        if (entries.isNotEmpty()) {
-            manifestDao.insertAll(entries)
+        db.withTransaction {
+            manifestDao.deleteByGroup(groupId)
+            if (entries.isNotEmpty()) {
+                manifestDao.insertAll(entries)
+            }
         }
     }
-    suspend fun removeManifestEntries(ids: List<Long>) = manifestDao.deleteByIds(ids)
+
+    /**
+     * Removes manifest rows by id. SQLite on Android <= 11 allows at most 999
+     * bound variables per statement, so a "Delete all" of thousands of files
+     * would throw after the files were already gone. Chunk the IN (...) list
+     * and run every chunk in one transaction.
+     */
+    suspend fun removeManifestEntries(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        db.withTransaction {
+            ids.chunked(SQLITE_MAX_BIND_ARGS).forEach { manifestDao.deleteByIds(it) }
+        }
+    }
+
+    companion object {
+        const val PREFS_NAME = "sackup"
+        const val KEY_DEFAULTS_SEEDED = "defaults_seeded"
+
+        /** Below SQLite's historical SQLITE_MAX_VARIABLE_NUMBER of 999. */
+        private const val SQLITE_MAX_BIND_ARGS = 900
+
+        /** The three groups created on first launch. */
+        fun defaultGroups(): List<BackupGroup> = listOf(
+            BackupGroup(name = "Images", phoneFolders = encodeFolders(listOf("DCIM", "Pictures"))),
+            BackupGroup(name = "Documents", phoneFolders = encodeFolders(listOf("Documents"))),
+            BackupGroup(name = "Music", phoneFolders = encodeFolders(listOf("Music")))
+        )
+    }
 }

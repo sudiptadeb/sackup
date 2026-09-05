@@ -27,17 +27,16 @@ interface ManifestEntryDao {
     @Query("SELECT * FROM manifest_entries WHERE groupId = :groupId AND backupSuccess = 1 ORDER BY dateModified ASC")
     suspend fun getSuccessfulByGroup(groupId: Long): List<ManifestEntry>
 
-    @Query("SELECT * FROM manifest_entries WHERE groupId = :groupId AND backupSuccess = 1 AND phoneFolder = :phoneFolder ORDER BY dateModified ASC")
-    suspend fun getSuccessfulByFolder(groupId: Long, phoneFolder: String): List<ManifestEntry>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /**
+     * Default (ABORT) conflict strategy: [BackupRepository.rebuildManifest]
+     * always deletes the group's rows first, so a unique-index conflict here
+     * means the engine produced duplicate entries — surface it, don't hide it.
+     */
+    @Insert
     suspend fun insertAll(entries: List<ManifestEntry>)
 
     @Query("DELETE FROM manifest_entries WHERE groupId = :groupId")
     suspend fun deleteByGroup(groupId: Long)
-
-    @Delete
-    suspend fun delete(entry: ManifestEntry)
 
     @Query("DELETE FROM manifest_entries WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)

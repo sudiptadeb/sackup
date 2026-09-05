@@ -14,11 +14,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sackup.service.FolderDiff
 import com.sackup.util.formatBytes
+import com.sackup.util.formatDuration
 
 data class AnalyzeSummary(
     val groupName: String,
@@ -27,6 +31,15 @@ data class AnalyzeSummary(
     val totalToCopy: Int,
     val totalToCopySize: Long,
     val scanDurationSeconds: Long = 0
+)
+
+private data class AnalyzeTotals(
+    val notBacked: Int,
+    val notBackedSize: Long,
+    val backed: Int,
+    val backedSize: Long,
+    val driveOnly: Int,
+    val driveOnlySize: Long,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -38,12 +51,13 @@ fun AnalyzeScreen(
     scanElapsedSeconds: Long = 0,
     onSyncNow: () -> Unit,
     onExport: () -> Unit,
+    onCancelScan: () -> Unit,
     onBack: () -> Unit,
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Analyze — ${summary?.groupName ?: ""}") },
+                title = { Text("Check what's backed up", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -52,7 +66,7 @@ fun AnalyzeScreen(
                 actions = {
                     if (summary != null && !isLoading) {
                         IconButton(onClick = onExport) {
-                            Icon(Icons.Default.Share, contentDescription = "Export report")
+                            Icon(Icons.Default.Share, contentDescription = "Share")
                         }
                     }
                 }
@@ -61,29 +75,57 @@ fun AnalyzeScreen(
     ) { padding ->
         if (isLoading) {
             Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator()
                     Spacer(Modifier.height(16.dp))
-                    Text(if (scanStatus.isNotEmpty()) scanStatus else "Scanning...")
+                    Text(
+                        scanStatus.ifEmpty { "Checking your files…" },
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center
+                    )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        formatDuration(scanElapsedSeconds),
+                        formatDuration(scanElapsedSeconds * 1000),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(Modifier.height(24.dp))
+                    OutlinedButton(
+                        onClick = onCancelScan,
+                        modifier = Modifier.heightIn(min = 48.dp)
+                    ) { Text("Cancel") }
                 }
             }
         } else if (summary == null) {
             Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("Could not load group data.")
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "This backup no longer exists.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("Go Back") }
+                }
             }
         } else {
+            val totals = remember(summary) {
+                AnalyzeTotals(
+                    notBacked = summary.folders.sumOf { it.toCopy },
+                    notBackedSize = summary.folders.sumOf { it.toCopySize },
+                    backed = summary.folders.sumOf { it.alreadyOnDrive },
+                    backedSize = summary.folders.sumOf { it.alreadyOnDriveSize },
+                    driveOnly = summary.folders.sumOf { it.onDriveOnly },
+                    driveOnlySize = summary.folders.sumOf { it.onDriveOnlySize },
+                )
+            }
+
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -92,15 +134,17 @@ fun AnalyzeScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
-                // Overall summary card
-                item {
-                    val totalNotBacked = summary.folders.sumOf { it.toCopy }
-                    val totalNotBackedSize = summary.folders.sumOf { it.toCopySize }
-                    val totalBacked = summary.folders.sumOf { it.alreadyOnDrive }
-                    val totalBackedSize = summary.folders.sumOf { it.alreadyOnDriveSize }
-                    val totalDriveOnly = summary.folders.sumOf { it.onDriveOnly }
-                    val totalDriveOnlySize = summary.folders.sumOf { it.onDriveOnlySize }
+                item(key = "title") {
+                    Text(
+                        summary.groupName,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
+                item(key = "summary") {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(
@@ -117,7 +161,7 @@ fun AnalyzeScreen(
 
                             if (summary.scanDurationSeconds > 0) {
                                 Text(
-                                    "Scanned in ${formatDuration(summary.scanDurationSeconds)}",
+                                    "Checked in ${formatDuration(summary.scanDurationSeconds * 1000)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -126,12 +170,14 @@ fun AnalyzeScreen(
 
                             if (!summary.driveConnected) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Warning, null,
+                                    Icon(
+                                        Icons.Default.Warning, contentDescription = null,
                                         tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(16.dp))
+                                        modifier = Modifier.size(16.dp)
+                                    )
                                     Spacer(Modifier.width(4.dp))
                                     Text(
-                                        "Drive not connected — showing manifest data only",
+                                        "Drive not plugged in — showing what was backed up last time",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.error
                                     )
@@ -141,61 +187,61 @@ fun AnalyzeScreen(
 
                             AnalyzeStatRow(
                                 icon = Icons.Default.Warning,
-                                iconTint = Color(0xFFFF9800),
-                                label = "Not backed up",
-                                count = totalNotBacked,
-                                size = totalNotBackedSize
+                                iconTint = MaterialTheme.colorScheme.tertiary,
+                                label = "Not backed up yet",
+                                count = totals.notBacked,
+                                size = totals.notBackedSize
                             )
                             AnalyzeStatRow(
                                 icon = Icons.Default.CheckCircle,
                                 iconTint = MaterialTheme.colorScheme.primary,
-                                label = "Backed up (on both)",
-                                count = totalBacked,
-                                size = totalBackedSize
+                                label = "Safe on the drive",
+                                count = totals.backed,
+                                size = totals.backedSize
                             )
-                            if (totalDriveOnly > 0) {
+                            if (totals.driveOnly > 0) {
                                 AnalyzeStatRow(
                                     icon = Icons.Default.Info,
                                     iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    label = "On drive only (deleted from phone)",
-                                    count = totalDriveOnly,
-                                    size = totalDriveOnlySize
+                                    label = "Only on the drive (removed from phone)",
+                                    count = totals.driveOnly,
+                                    size = totals.driveOnlySize
                                 )
                             }
                         }
                     }
                 }
 
-                // Sync Now button
                 if (summary.totalToCopy > 0 && summary.driveConnected) {
-                    item {
+                    item(key = "sync") {
                         Button(
                             onClick = onSyncNow,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(56.dp)
+                                .heightIn(min = 56.dp)
                         ) {
                             Text(
-                                "Sync Now — ${summary.totalToCopy} files (${formatBytes(summary.totalToCopySize)})",
+                                "Back up these ${summary.totalToCopy} files (${formatBytes(summary.totalToCopySize)})",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
+                                fontSize = 16.sp,
+                                textAlign = TextAlign.Center
                             )
                         }
                     }
                 } else if (summary.totalToCopy == 0 && summary.driveConnected) {
-                    item {
+                    item(key = "all-good") {
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onTertiaryContainer
                             )
                         ) {
                             Row(
                                 modifier = Modifier.padding(16.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.CheckCircle, null,
-                                    tint = MaterialTheme.colorScheme.primary)
+                                Icon(Icons.Default.CheckCircle, contentDescription = null)
                                 Spacer(Modifier.width(12.dp))
                                 Text(
                                     "Everything is backed up!",
@@ -207,7 +253,6 @@ fun AnalyzeScreen(
                     }
                 }
 
-                // Per-folder breakdown
                 items(summary.folders, key = { it.phoneFolder }) { result ->
                     AnalyzeFolderCard(result)
                 }
@@ -218,7 +263,7 @@ fun AnalyzeScreen(
 
 @Composable
 fun AnalyzeStatRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     iconTint: Color,
     label: String,
     count: Int,
@@ -230,13 +275,15 @@ fun AnalyzeStatRow(
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = iconTint, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
         Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.width(8.dp))
         Text(
             "$count files · ${formatBytes(size)}",
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End
         )
     }
 }
@@ -248,7 +295,9 @@ fun AnalyzeFolderCard(result: FolderDiff) {
             Text(
                 result.phoneFolder,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
 
             Spacer(Modifier.height(8.dp))
@@ -267,8 +316,8 @@ fun AnalyzeFolderCard(result: FolderDiff) {
             if (result.toCopy > 0) {
                 AnalyzeStatRow(
                     icon = Icons.Default.Warning,
-                    iconTint = Color(0xFFFF9800),
-                    label = "Not backed up",
+                    iconTint = MaterialTheme.colorScheme.tertiary,
+                    label = "Not backed up yet",
                     count = result.toCopy,
                     size = result.toCopySize
                 )
@@ -277,7 +326,7 @@ fun AnalyzeFolderCard(result: FolderDiff) {
                 AnalyzeStatRow(
                     icon = Icons.Default.CheckCircle,
                     iconTint = MaterialTheme.colorScheme.primary,
-                    label = "Backed up",
+                    label = "Safe on the drive",
                     count = result.alreadyOnDrive,
                     size = result.alreadyOnDriveSize
                 )
@@ -286,7 +335,7 @@ fun AnalyzeFolderCard(result: FolderDiff) {
                 AnalyzeStatRow(
                     icon = Icons.Default.Info,
                     iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    label = "Deleted from phone",
+                    label = "Removed from phone",
                     count = result.onDriveOnly,
                     size = result.onDriveOnlySize
                 )
@@ -294,18 +343,12 @@ fun AnalyzeFolderCard(result: FolderDiff) {
             if (result.toCopy == 0 && result.totalOnPhone > 0) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Fully backed up",
-                    color = MaterialTheme.colorScheme.primary,
+                    "All safe on the drive",
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp
                 )
             }
         }
     }
-}
-
-private fun formatDuration(seconds: Long): String {
-    val m = seconds / 60
-    val s = seconds % 60
-    return if (m > 0) "${m}m ${s}s" else "${s}s"
 }

@@ -1,11 +1,13 @@
-SackUp backs up your phone files (photos, videos, downloads) to a USB drive via OTG cable. No cloud services, no accounts, no internet required.
+SackUp backs up your phone files (photos, videos, documents, music) to a USB drive via OTG cable. No cloud services, no accounts, no internet required.
+
+It comes with three backup groups ready to go — Photos (DCIM and Pictures), Documents and Music — and you can add a group for any folder you choose.
 
 Features:
-* Back up photos, videos, downloads, and WhatsApp media to USB drive
-* Simple one-tap backup with large buttons designed for everyone
-* Analyze what needs backing up before syncing
-* Smart duplicate detection — skips files already on the drive
-* Parallel file copying for faster transfers
-* Foreground service with progress notifications
+* One-tap backup with large buttons and simple words, designed for everyone
+* Only copies what is new — files already on the drive are skipped
+* Every copied file is written all the way to the drive and checked before it counts as saved
+* Check what is backed up, even without the drive plugged in
+* Free Up Space: safely remove files from the phone that are confirmed on the drive
+* Keeps going in the background with a progress notification
 * Works completely offline — your files never leave your devices
 * Free and open source
