@@ -25,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.lifecycleScope
@@ -41,9 +42,11 @@ import com.sackup.data.encodeFolders
 import com.sackup.data.folderList
 import com.sackup.service.BackupEngine
 import com.sackup.service.BackupService
+import com.sackup.service.InterruptedBackups
 import com.sackup.service.SnapshotResult
 import com.sackup.ui.*
 import com.sackup.ui.theme.SackUpTheme
+import com.sackup.util.DriveVolumes
 import com.sackup.util.FolderStats
 import com.sackup.util.MediaStoreCompat
 import com.sackup.util.queryFolderStats
@@ -82,7 +85,35 @@ internal fun deleteResultMessage(deletedCount: Int, requestedCount: Int): String
     else -> "Deleted $deletedCount files"
 }
 
+/**
+ * Which groups a drive-arrival run should back up: the groups still pending from an interrupted
+ * run (if any of them still exist), otherwise every group.
+ */
+internal fun groupIdsToRun(interruptedIds: List<Long>, allGroupIds: List<Long>): List<Long> {
+    val pending = interruptedIds.filter { it in allGroupIds }
+    return if (pending.isNotEmpty()) pending else allGroupIds
+}
+
+/** True when an Intent means "the USB drive was just plugged in" (system attach or our notification). */
+internal fun isDriveArrivalIntent(action: String?, driveConnectedExtra: Boolean): Boolean =
+    action == "android.hardware.usb.action.USB_DEVICE_ATTACHED" || driveConnectedExtra
+
+/** State behind the "Back up now?" dialog shown when the drive is plugged in. */
+private data class ConnectPrompt(val interrupted: Boolean, val groupIds: List<Long>)
+
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /** Boolean extra: the drive-connected notification was tapped. */
+        const val EXTRA_DRIVE_CONNECTED = "drive_connected"
+        private const val ACTION_USB_DEVICE_ATTACHED = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
+        private const val ARRIVAL_POLL_ATTEMPTS = 20
+        private const val ARRIVAL_POLL_INTERVAL_MS = 1000L
+
+        /** Read by [DriveMountedReceiver]: while the activity is started it handles mounts itself. */
+        @Volatile var isInForeground: Boolean = false
+            private set
+    }
 
     private lateinit var repo: BackupRepository
     private var driveUri by mutableStateOf<Uri?>(null)
@@ -93,6 +124,8 @@ class MainActivity : ComponentActivity() {
     private var pendingOpenProgress by mutableStateOf(false)
     private var showPrimaryStorageDialog by mutableStateOf(false)
     private var showDriveHelpDialog by mutableStateOf(false)
+    private var onConnectMode by mutableStateOf(OnConnectMode.ASK)
+    private var connectPrompt by mutableStateOf<ConnectPrompt?>(null)
     private var groups = mutableStateListOf<BackupGroup>()
     private var groupStats = mutableStateMapOf<Long, FolderStats>()
     private var logs = mutableStateListOf<LogEntry>()
@@ -103,10 +136,27 @@ class MainActivity : ComponentActivity() {
     private var driveCheckGeneration = 0
     private var driveCheckJob: Job? = null
 
+    // Drive-arrival flow: only the newest poll runs, and each mount prompts at most once.
+    private var arrivalJob: Job? = null
+    private var promptedVolumeId: String? = null
+
     private val mediaReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "Media broadcast: ${intent?.action}")
+            Log.d(TAG, "Media broadcast: ${intent?.action} ${intent?.data}")
             scheduleDriveCheck()
+            val saved = driveUri ?: return
+            if (!DriveVolumes.eventConcernsDrive(intent?.data, saved)) return
+            when (intent?.action) {
+                Intent.ACTION_MEDIA_MOUNTED -> {
+                    val volumeId = DriveVolumes.volumeIdOfMountPath(intent.data) ?: ""
+                    if (volumeId == promptedVolumeId) return   // already handled this mount
+                    promptedVolumeId = volumeId
+                    handleDriveArrival("mount")
+                }
+                Intent.ACTION_MEDIA_UNMOUNTED,
+                Intent.ACTION_MEDIA_EJECT,
+                Intent.ACTION_MEDIA_REMOVED -> promptedVolumeId = null
+            }
         }
     }
 
@@ -148,12 +198,16 @@ class MainActivity : ComponentActivity() {
             driveUri = runCatching { Uri.parse(saved) }.getOrNull()
         }
         scheduleDriveCheck()
+        onConnectMode = ConnectPrefs.get(this)
 
         mediaPermissionGranted = computeMediaPermissionGranted()
         if (savedInstanceState == null) {
             requestPermissions()
             if (intent?.getBooleanExtra(BackupService.EXTRA_OPEN_PROGRESS, false) == true) {
                 pendingOpenProgress = true
+            }
+            if (isDriveArrivalIntent(intent?.action, intent?.getBooleanExtra(EXTRA_DRIVE_CONNECTED, false) == true)) {
+                handleDriveArrival("launch intent")
             }
         }
 
@@ -177,6 +231,19 @@ class MainActivity : ComponentActivity() {
                         if (p.isDone && !wasDone) refreshGroups()
                         wasDone = p.isDone
                     }
+                }
+
+                connectPrompt?.let { prompt ->
+                    DriveConnectedDialog(
+                        interrupted = prompt.interrupted,
+                        groupCount = prompt.groupIds.size,
+                        driveName = driveName,
+                        onBackUp = {
+                            connectPrompt = null
+                            startRun(prompt.groupIds)
+                        },
+                        onDismiss = { connectPrompt = null }
+                    )
                 }
 
                 if (showPrimaryStorageDialog) {
@@ -246,25 +313,14 @@ class MainActivity : ComponentActivity() {
                             onRequestPermission = { requestPermissions() },
                             onOpenAppSettings = { openAppSettings() },
                             onPickDrive = { onPickDriveRequested() },
-                            onBackup = { group ->
-                                val uri = driveUri
-                                when {
-                                    uri == null -> Toast.makeText(
-                                        this@MainActivity,
-                                        "Please select a USB drive first",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                    !driveConnected -> Toast.makeText(
-                                        this@MainActivity,
-                                        "Plug in the USB drive first — it isn't connected right now",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                    else -> {
-                                        BackupService.start(this@MainActivity, group.id, uri)
-                                        navController.navigate(Routes.PROGRESS)
-                                    }
-                                }
+                            onBackup = { group -> startRun(listOf(group.id)) },
+                            onConnectMode = onConnectMode,
+                            onConnectModeChange = { mode ->
+                                onConnectMode = mode
+                                ConnectPrefs.set(this@MainActivity, mode)
                             },
+                            showBackupAll = groups.size >= 2 && driveConnected,
+                            onBackupAll = { startRun(groups.map { it.id }) },
                             onEditGroup = { group ->
                                 navController.navigate(Routes.setup(group.id))
                             },
@@ -348,7 +404,15 @@ class MainActivity : ComponentActivity() {
                     composable(Routes.PROGRESS) {
                         ProgressScreen(
                             onBack = { navController.popBackStack() },
-                            onCancel = { BackupService.cancel(this@MainActivity) }
+                            onCancel = { BackupService.cancel(this@MainActivity) },
+                            driveConnected = driveConnected,
+                            onContinue = {
+                                val p = BackupService.progress.value
+                                startRun(
+                                    InterruptedBackups.load(this@MainActivity)
+                                        .ifEmpty { p.queuedGroupIds.drop(p.groupIndex) }
+                                )
+                            }
                         )
                     }
 
@@ -580,10 +644,16 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra(BackupService.EXTRA_OPEN_PROGRESS, false)) {
             pendingOpenProgress = true
         }
+        if (isDriveArrivalIntent(intent.action, intent.getBooleanExtra(EXTRA_DRIVE_CONNECTED, false))) {
+            handleDriveArrival("new intent")
+        }
     }
 
     override fun onStart() {
         super.onStart()
+        isInForeground = true
+        // The app is visible now; a pending "drive connected" notification would be stale.
+        runCatching { NotificationManagerCompat.from(this).cancel(DriveMountedReceiver.NOTIFICATION_ID) }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_MEDIA_MOUNTED)
             addAction(Intent.ACTION_MEDIA_UNMOUNTED)
@@ -596,8 +666,90 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        isInForeground = false
         runCatching { unregisterReceiver(mediaReceiver) }
         super.onStop()
+    }
+
+    // ── Drive arrival ("back up now?") ─────────────────────────────────────
+
+    /**
+     * The USB drive was just plugged in (system attach intent, our notification, or a MEDIA_MOUNTED
+     * broadcast while the app is open). The volume mounts a few seconds after attach, so poll the
+     * drive for up to ~20 s; then either show the progress screen (a run is already going), start
+     * a run (mode AUTO), ask (mode ASK) or do nothing (mode OFF).
+     */
+    private fun handleDriveArrival(source: String) {
+        if (connectPrompt != null) return   // already asking
+        Log.d(TAG, "Drive arrival ($source)")
+        runCatching { NotificationManagerCompat.from(this).cancel(DriveMountedReceiver.NOTIFICATION_ID) }
+        arrivalJob?.cancel()
+        arrivalJob = lifecycleScope.launch {
+            var attempts = 0
+            while (attempts < ARRIVAL_POLL_ATTEMPTS) {
+                checkDriveConnection()
+                if (driveConnected) break
+                attempts++
+                delay(ARRIVAL_POLL_INTERVAL_MS)
+            }
+            if (!driveConnected) {
+                Log.d(TAG, "Drive arrival ($source): drive never became reachable")
+                return@launch
+            }
+            if (BackupService.progress.value.isRunning) {
+                pendingOpenProgress = true
+                return@launch
+            }
+            val mode = ConnectPrefs.get(this@MainActivity)
+            onConnectMode = mode
+            if (mode == OnConnectMode.OFF) return@launch
+
+            val allIds = try {
+                repo.getAllGroups().map { it.id }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not load groups for drive arrival", e)
+                return@launch
+            }
+            if (allIds.isEmpty()) return@launch
+            val remembered = InterruptedBackups.load(this@MainActivity)
+            val interrupted = remembered.filter { it in allIds }
+            if (remembered.isNotEmpty() && interrupted.isEmpty()) {
+                InterruptedBackups.clear(this@MainActivity)   // those groups no longer exist
+            }
+            val ids = groupIdsToRun(interrupted, allIds)
+            if (connectPrompt != null) return@launch
+            when (mode) {
+                OnConnectMode.AUTO -> startRun(ids)
+                else -> connectPrompt = ConnectPrompt(interrupted = interrupted.isNotEmpty(), groupIds = ids)
+            }
+        }
+    }
+
+    /** Start a backup run over [ids] (in order) and open the progress screen. */
+    private fun startRun(ids: List<Long>) {
+        val uri = driveUri
+        when {
+            ids.isEmpty() -> return
+            uri == null -> Toast.makeText(
+                this,
+                "Please select a USB drive first",
+                Toast.LENGTH_SHORT
+            ).show()
+            !driveConnected -> Toast.makeText(
+                this,
+                "Plug in the USB drive first — it isn't connected right now",
+                Toast.LENGTH_LONG
+            ).show()
+            else -> {
+                // This run covers everything left from the last interruption; the service
+                // remembers a fresh remainder if the drive goes away again.
+                if (ids.containsAll(InterruptedBackups.load(this))) InterruptedBackups.clear(this)
+                BackupService.start(this, ids, uri)
+                pendingOpenProgress = true
+            }
+        }
     }
 
     override fun onResume() {

@@ -33,11 +33,38 @@ import kotlinx.coroutines.delay
 
 private const val MAX_INLINE_FAILED = 8
 
+/** "Photos (2 of 3)" during a multi-group run, otherwise just the group name. */
+internal fun groupLabel(name: String, groupIndex: Int, groupCount: Int): String =
+    if (groupCount > 1) "$name (${groupIndex + 1} of $groupCount)" else name
+
+internal fun groupLabel(progress: BackupProgress): String =
+    groupLabel(progress.groupName, progress.groupIndex, progress.groupCount)
+
+/** "Saved so far: 12 files (1.2 GB)" — shown after an interrupted run. */
+internal fun savedSoFarLine(files: Int, bytes: Long): String =
+    "Saved so far: $files ${if (files == 1) "file" else "files"} (${formatBytes(bytes)})"
+
+/** Sentence under "All done". Multi-group runs describe the whole run. */
+internal fun successSentence(copied: Int, bytes: Long, groupCount: Int): String = when {
+    copied == 0 -> "Everything was already on the drive."
+    groupCount > 1 -> "$copied files are now safely on your USB drive (${formatBytes(bytes)}) across $groupCount backups"
+    else -> "$copied files are now safely on your USB drive (${formatBytes(bytes)})"
+}
+
+/** Sentence under "N files could not be copied". */
+internal fun partialSentence(copied: Int, bytes: Long, groupCount: Int): String = when {
+    copied == 0 -> "Nothing was copied this time. Try running the backup again."
+    groupCount > 1 -> "$copied files are safely on the drive (${formatBytes(bytes)}) across $groupCount backups. Try running the backup again for the rest."
+    else -> "$copied files are safely on the drive (${formatBytes(bytes)}). Try running the backup again for the rest."
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProgressScreen(
     onBack: () -> Unit,
     onCancel: () -> Unit,
+    driveConnected: Boolean = false,
+    onContinue: () -> Unit = {},
 ) {
     val progress: BackupProgress by BackupService.progress.collectAsState()
     val context = LocalContext.current
@@ -80,7 +107,7 @@ fun ProgressScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
-                progress.groupName.ifEmpty { "Backup" },
+                groupLabel(progress).ifEmpty { "Backup" },
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
@@ -88,7 +115,12 @@ fun ProgressScreen(
 
             when {
                 progress.isRunning -> RunningContent(progress = progress, now = now, onCancel = onCancel)
-                progress.isDone -> DoneContent(progress = progress, onBack = onBack)
+                progress.isDone -> DoneContent(
+                    progress = progress,
+                    driveConnected = driveConnected,
+                    onContinue = onContinue,
+                    onBack = onBack
+                )
                 else -> {
                     Text(
                         "No backup is running right now.",
@@ -219,32 +251,40 @@ private fun RunningContent(progress: BackupProgress, now: Long, onCancel: () -> 
 }
 
 @Composable
-private fun DoneContent(progress: BackupProgress, onBack: () -> Unit) {
+private fun DoneContent(
+    progress: BackupProgress,
+    driveConnected: Boolean,
+    onContinue: () -> Unit,
+    onBack: () -> Unit,
+) {
     val clipboard = LocalClipboardManager.current
-    val copied = progress.copiedCount
-    val failed = progress.failedFiles
+    // Multi-group runs report the whole run; the per-group counters only cover the last group.
+    val multi = progress.isMultiGroup
+    val copied = if (multi) maxOf(progress.runCopiedFiles, progress.copiedCount) else progress.copiedCount
+    val copiedBytes = if (multi) maxOf(progress.runCopiedBytes, progress.copiedBytes) else progress.copiedBytes
+    val failed = if (multi) maxOf(progress.runFailedFiles, progress.failedFiles) else progress.failedFiles
 
     val headline: String
     val sentence: String
     val headlineColor = when (progress.outcome) {
         BackupOutcome.SUCCESS -> MaterialTheme.colorScheme.primary
-        BackupOutcome.PARTIAL -> MaterialTheme.colorScheme.tertiary
+        BackupOutcome.PARTIAL, BackupOutcome.INTERRUPTED -> MaterialTheme.colorScheme.tertiary
         else -> MaterialTheme.colorScheme.error
     }
     when (progress.outcome) {
         BackupOutcome.SUCCESS -> {
             headline = "All done"
-            sentence = if (copied == 0 && failed == 0)
-                "Everything was already on the drive."
-            else
-                "$copied files are now safely on your USB drive (${formatBytes(progress.copiedBytes)})"
+            sentence = successSentence(copied, copiedBytes, progress.groupCount)
         }
         BackupOutcome.PARTIAL -> {
             headline = "$failed files could not be copied"
-            sentence = if (copied > 0)
-                "$copied files are safely on the drive (${formatBytes(progress.copiedBytes)}). Try running the backup again for the rest."
-            else
-                "Nothing was copied this time. Try running the backup again."
+            sentence = partialSentence(copied, copiedBytes, progress.groupCount)
+        }
+        BackupOutcome.INTERRUPTED -> {
+            headline = "The drive was unplugged"
+            sentence = progress.errorMessage.ifEmpty {
+                "The backup stopped because the USB drive went away."
+            }
         }
         BackupOutcome.CANCELLED -> {
             headline = "Backup stopped"
@@ -262,7 +302,7 @@ private fun DoneContent(progress: BackupProgress, onBack: () -> Unit) {
     Icon(
         when (progress.outcome) {
             BackupOutcome.SUCCESS -> Icons.Default.CheckCircle
-            BackupOutcome.PARTIAL, BackupOutcome.CANCELLED -> Icons.Default.Warning
+            BackupOutcome.PARTIAL, BackupOutcome.CANCELLED, BackupOutcome.INTERRUPTED -> Icons.Default.Warning
             else -> Icons.Default.ErrorOutline
         },
         contentDescription = null,
@@ -281,6 +321,14 @@ private fun DoneContent(progress: BackupProgress, onBack: () -> Unit) {
         style = MaterialTheme.typography.bodyLarge,
         textAlign = TextAlign.Center
     )
+    if (progress.outcome == BackupOutcome.INTERRUPTED) {
+        Text(
+            savedSoFarLine(copied, copiedBytes),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
+        )
+    }
 
     // Failed list (capped)
     if (progress.failedFilesList.isNotEmpty()) {
@@ -329,8 +377,9 @@ private fun DoneContent(progress: BackupProgress, onBack: () -> Unit) {
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (multi) StatRow("Backups", "${progress.groupCount}")
             StatRow("Files copied", "$copied")
-            StatRow("Data copied", formatBytes(progress.copiedBytes))
+            StatRow("Data copied", formatBytes(copiedBytes))
             if (progress.skippedFiles > 0) StatRow("Already on drive", "${progress.skippedFiles}")
             if (failed > 0) StatRow("Could not copy", "$failed")
             if (progress.startTimeMillis > 0 && progress.endTimeMillis > progress.startTimeMillis) {
@@ -345,11 +394,35 @@ private fun DoneContent(progress: BackupProgress, onBack: () -> Unit) {
 
     Spacer(Modifier.height(8.dp))
 
-    Button(
-        onClick = onBack,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-    ) {
-        Text("Done", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+    if (progress.outcome == BackupOutcome.INTERRUPTED) {
+        Button(
+            onClick = onContinue,
+            enabled = driveConnected,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp)
+        ) {
+            Text("Continue backup", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+        }
+        if (!driveConnected) {
+            Text(
+                "Plug the USB drive back in to continue",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+        OutlinedButton(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+        ) {
+            Text("Done", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        }
+    } else {
+        Button(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+        ) {
+            Text("Done", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        }
     }
 }
 
