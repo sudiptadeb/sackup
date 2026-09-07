@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- USB mass-storage devices (class 8). The specific SCSI/bulk-only entry matches most
+     flash drives; the plain class-8 entry catches card readers and other mass-storage variants. -->
+<resources>
+    <usb-device class="8" subclass="6" protocol="80" />
+    <usb-device class="8" />
+</resources>

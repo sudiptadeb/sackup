@@ -236,6 +236,8 @@ class BackupEngine(private val resolver: ContentResolver) {
      * - If the calling coroutine is cancelled (or [isCancelled] turns true) the partial result
      *   is still returned with [CopyResult.cancelled] = true so the caller can record what
      *   did make it onto the drive.
+     * - While [driveGone] is true no clean-up is attempted on the drive (it is not there any more;
+     *   the next run's snapshot removes the partial file instead).
      */
     suspend fun parallelCopy(
         snapshot: SnapshotResult,
@@ -243,6 +245,7 @@ class BackupEngine(private val resolver: ContentResolver) {
         isCancelled: () -> Boolean,
         bytesCopied: AtomicLong = AtomicLong(0),
         onLog: suspend (level: String, message: String) -> Unit = { _, _ -> },
+        driveGone: () -> Boolean = { false },
         onFileDone: (completed: Int, failed: Int, fileName: String) -> Unit
     ): CopyResult {
         val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
@@ -299,7 +302,7 @@ class BackupEngine(private val resolver: ContentResolver) {
 
                             var fileBytes = 0L
                             try {
-                                copyOneFile(job, treeUri, isCancelled) { delta ->
+                                copyOneFile(job, treeUri, isCancelled, driveGone) { delta ->
                                     fileBytes += delta
                                     bytesCopied.addAndGet(delta)
                                 }
@@ -580,12 +583,14 @@ class BackupEngine(private val resolver: ContentResolver) {
      *  3. write through a file descriptor so the data can be fsync'ed before we trust it;
      *  4. re-query the destination: size and display name must match what we asked for
      *     (the provider silently renames on collision and sanitises invalid FAT names).
-     * Anything that fails after step 2 deletes the destination and rethrows.
+     * Anything that fails after step 2 deletes the destination and rethrows — unless [driveGone]
+     * says the drive was unplugged, in which case there is nothing left to talk to.
      */
     private fun copyOneFile(
         job: CopyJob,
         treeUri: Uri,
         isCancelled: () -> Boolean,
+        driveGone: () -> Boolean,
         onChunk: (Long) -> Unit
     ) {
         if (isCancelled()) throw CancelledException()
@@ -640,8 +645,10 @@ class BackupEngine(private val resolver: ContentResolver) {
             }
             verifyDestination(destUri, job.phone)
         } catch (e: Exception) {
-            // Clean up the partial/unverified file on the drive
-            try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
+            // Clean up the partial/unverified file on the drive (pointless once the drive is gone)
+            if (!driveGone()) {
+                try { DocumentsContract.deleteDocument(resolver, destUri) } catch (_: Exception) {}
+            }
             throw e
         }
 

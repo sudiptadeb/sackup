@@ -31,9 +31,10 @@ SackUp is an Android app that copies your phone's photos, videos, and files to a
 
 ### Everyday Use (what your parents do)
 
-1. Plug in the USB drive
-2. Open SackUp
-3. Tap a backup group — that's it
+1. Plug in the USB drive — SackUp opens by itself (Android asks once whether to always open it for that drive)
+2. Tap **Back up now** — every backup group runs, one after the other
+
+That's it. If you'd rather it started without asking, or not at all, the drive card on the home screen has a setting: **Ask me** / **Back up automatically** / **Do nothing**. The same **Back up everything** button is on the home screen, and each group still has its own **Back Up Now**.
 
 Only new files are copied. When it's done: **"12 files are now safely on your USB drive (4.2 GB)"**.
 
@@ -56,7 +57,7 @@ A built-in history screen shows everything that happened — current session and
 - **Runs in foreground and background.** Backup keeps going if the user switches apps, locks the screen, or gets a phone call. A persistent notification shows progress the entire time.
 - **Progress is always visible.** The notification shows which file is being copied and overall percentage. Inside the app, a full progress screen shows file count, current file name, and bytes transferred in real time.
 - **Only copies what's new.** Before copying, the app scans the drive folder. Files already there (matched by name and size) are skipped. No wasted time re-copying.
-- **Picks up where it left off.** If backup is interrupted (cable pulled, phone dies), just run it again. Already-copied files are skipped, and it resumes from where it stopped.
+- **Survives a yanked cable.** If the drive is unplugged mid-backup the run stops within a second, everything verified so far is recorded, and the progress screen says "The drive was unplugged" with a **Continue backup** button that lights up when the drive is back. The next time the drive is plugged in, the prompt says "Your last backup was interrupted. Continue?" and finishes only the groups that did not complete. Partial files left on the drive are replaced on that run.
 - **Verifies every file.** Every copy is flushed all the way to the drive (fsync), then its name and size on the drive are checked against the source. A mismatch is deleted from the drive and reported — no silent corruption.
 - **Cancellable anytime.** Cancel button in the notification and in the app. Stops mid-file; the partially written file is removed from the drive.
 - **Errors don't stop the job.** If one file fails, it's skipped and reported at the end. The rest of the backup continues. The summary shows exactly what failed and why, in plain language.

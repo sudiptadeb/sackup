@@ -2,3 +2,4 @@
 • Clearer progress while copying and a plain-language summary when it finishes.
 • Asks you to confirm before deleting a backup group.
 • Now works on Android 8 and 9 too.
+• Plug in the drive and SackUp opens and offers to back up everything; unplugging mid-backup can be resumed.

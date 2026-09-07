@@ -2,6 +2,8 @@ package com.sackup.ui
 
 import android.net.Uri
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -18,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sackup.OnConnectMode
 import com.sackup.data.BackupGroup
 import com.sackup.service.BackupProgress
 import com.sackup.service.BackupService
@@ -52,6 +55,10 @@ fun HomeScreen(
     onAnalyze: (BackupGroup) -> Unit,
     onViewLogs: () -> Unit,
     onViewProgress: () -> Unit,
+    onConnectMode: OnConnectMode = OnConnectMode.ASK,
+    onConnectModeChange: (OnConnectMode) -> Unit = {},
+    onBackupAll: () -> Unit = {},
+    showBackupAll: Boolean = false,
 ) {
     val progress: BackupProgress by BackupService.progress.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -122,13 +129,42 @@ fun HomeScreen(
                     checking = driveChecking,
                     driveUri = driveUri,
                     driveName = driveName,
-                    onPickDrive = onPickDrive
+                    onPickDrive = onPickDrive,
+                    onConnectMode = onConnectMode,
+                    onConnectModeChange = onConnectModeChange
                 )
             }
 
             if (progress.isRunning) {
                 item(key = "running") {
                     RunningBanner(progress = progress, onClick = onViewProgress)
+                }
+            }
+
+            if (showBackupAll) {
+                item(key = "backup_all") {
+                    Button(
+                        onClick = {
+                            if (progress.isRunning) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        "A backup is already running — tap the blue banner to watch it"
+                                    )
+                                }
+                            } else {
+                                onBackupAll()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 64.dp)
+                    ) {
+                        Text(
+                            "Back up everything",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
@@ -245,10 +281,11 @@ private fun RunningBanner(progress: BackupProgress, onClick: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text("Backup in progress", fontWeight = FontWeight.Bold)
+                val label = groupLabel(progress)
                 val detail = if (progress.totalFiles > 0)
-                    "${progress.groupName} — ${progress.completedFiles} of ${progress.totalFiles} files"
+                    "$label — ${progress.completedFiles} of ${progress.totalFiles} files"
                 else
-                    "${progress.groupName} — ${progress.statusText.ifEmpty { "Getting ready…" }}"
+                    "$label — ${progress.statusText.ifEmpty { "Getting ready…" }}"
                 Text(
                     detail,
                     style = MaterialTheme.typography.bodySmall,
@@ -272,6 +309,8 @@ fun DriveStatusCard(
     driveUri: Uri?,
     driveName: String,
     onPickDrive: () -> Unit,
+    onConnectMode: OnConnectMode? = null,
+    onConnectModeChange: (OnConnectMode) -> Unit = {},
 ) {
     val containerColor = when {
         checking -> MaterialTheme.colorScheme.surfaceVariant
@@ -282,6 +321,7 @@ fun DriveStatusCard(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = containerColor)
     ) {
+      Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -343,7 +383,49 @@ fun DriveStatusCard(
                 Text(if (connected) "Change" else "Select Drive")
             }
         }
+        if (onConnectMode != null && driveUri != null) {
+            OnConnectRow(
+                mode = onConnectMode,
+                onModeChange = onConnectModeChange,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+            )
+        }
+      }
     }
+}
+
+/** "When the drive is plugged in:" — Ask me / Back up automatically / Do nothing. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun OnConnectRow(
+    mode: OnConnectMode,
+    onModeChange: (OnConnectMode) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier) {
+        Text(
+            "When the drive is plugged in:",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (option in OnConnectMode.values()) {
+                FilterChip(
+                    selected = mode == option,
+                    onClick = { onModeChange(option) },
+                    label = { Text(onConnectModeLabel(option)) },
+                    modifier = Modifier.heightIn(min = 40.dp)
+                )
+            }
+        }
+    }
+}
+
+/** Plain-language label for each on-connect setting. */
+internal fun onConnectModeLabel(mode: OnConnectMode): String = when (mode) {
+    OnConnectMode.ASK -> "Ask me"
+    OnConnectMode.AUTO -> "Back up automatically"
+    OnConnectMode.OFF -> "Do nothing"
 }
 
 @Composable
